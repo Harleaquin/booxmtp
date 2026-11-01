@@ -90,6 +90,13 @@ pub enum Error {
     #[error("the device reports no storage")]
     NoStorage,
 
+    /// The operation is understood but not implemented by `booxmtp` yet.
+    #[error("{what}")]
+    UnsupportedByApp {
+        /// What was attempted.
+        what: String,
+    },
+
     /// The background I/O worker of the TUI stopped unexpectedly.
     #[error("background I/O worker failed: {message}")]
     Worker {
@@ -333,6 +340,9 @@ impl Error {
                 "unlock the reader, make sure a storage volume is mounted, then try again."
                     .to_string(),
             ),
+            Error::UnsupportedByApp { .. } => {
+                Some("use a local panel in between (download first, then upload).".to_string())
+            }
             Error::Unsupported { .. } => Some(
                 "the reader's MTP implementation does not advertise this operation; check the \
                  device's USB mode or update its firmware."
@@ -452,8 +462,8 @@ impl Error {
             | Error::StorageAliasUnavailable { .. }
             | Error::StorageNotFound { .. }
             | Error::StorageReadOnly { .. }
-            | Error::NoStorage
-            | Error::Unsupported { .. } => exit_code::STORAGE_SELECTION,
+            | Error::NoStorage => exit_code::STORAGE_SELECTION,
+            Error::Unsupported { .. } | Error::UnsupportedByApp { .. } => exit_code::FAILURE,
             Error::InvalidRemotePath { .. }
             | Error::RemotePathNotFound { .. }
             | Error::RemoteNotADirectory { .. }

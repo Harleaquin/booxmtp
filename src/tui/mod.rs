@@ -9,7 +9,7 @@
 //! ├───────────────────────────┴───────────────────────────────────────────────┤
 //! │ Roman.epub   1.2 MiB   2026-11-01 14:46      [40.8 GiB free]             │
 //! │ Copied Roman.epub (1.2 MiB) → /Books                                      │
-//! │ Space Mark  Ctrl-A All  Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit …           │
+//! │ Space Mark  Ctrl-A All  Ctrl-C Copy  Ctrl-X Move  Ctrl-D Del …           │
 //! └───────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -24,8 +24,9 @@
 //! * Cancellation goes through a shared `CancelToken`, so pressing Esc aborts a running transfer
 //!   without waiting for the worker to pick up a message.
 //!
-//! The panel model is deliberately backend-neutral (`entry::Location` is either a local folder or
-//! a storage + remote path), so local↔reader copies use the same code paths as the CLI.
+//! The panel model is deliberately backend-neutral ([`crate::location::Location`] is either a local
+//! folder or a storage + remote path). Recursive copy, move and delete live in [`crate::tree`], so
+//! they are shared with any future frontend and tested without a terminal.
 
 mod app;
 mod entry;
@@ -154,7 +155,12 @@ fn dispatch_all(actions: Vec<Action>, worker: &WorkerHandle) -> Result<()> {
     for action in actions {
         match action {
             Action::List { panel, location } => worker.list(panel, location),
-            Action::Copy(request) => worker.copy(request),
+            Action::Transfer(request) => worker.transfer(request),
+            Action::Delete {
+                panel,
+                location,
+                names,
+            } => worker.delete(panel, location, names),
             Action::CreateDir {
                 panel,
                 parent,

@@ -32,10 +32,11 @@ Der MVP aus `PLAN.md` ist umgesetzt und auf echter Hardware verifiziert:
 * Push/Pull-Roundtrip bytegleich (SHA-256 auf BOOX Go Color 7, macOS, Apple Silicon)
 * Fehlerfälle: fehlender Pfad, Kollision, fehlende SD-Karte, ungültige Storage-ID, Abbruch
 * **TUI im Midnight-Commander-Stil** (`booxmtp tui`): zwei Panels (lokal ↔ Reader), Navigation,
-  Kopieren mit Fortschritt/Abbrechen, Ordner anlegen, Storage-Wechsel, Hilfebildschirm
+  Mehrfachauswahl, Kopieren, **Verschieben**, **Löschen mit Rückfrage**, rekursive Ordner,
+  Fortschritt/Abbrechen, Storage-Wechsel, Hilfebildschirm
 
-Noch nicht enthalten (bewusst, siehe „Nicht-Ziele“): rekursive Transfers, `rm`/`mv`, Synchronisation,
-`--json`, GUI.
+Noch nicht enthalten (bewusst, siehe „Nicht-Ziele“): Synchronisation, `--json`, GUI, Löschen/
+Verschieben im CLI (bisher nur in der TUI).
 
 ## Voraussetzungen
 
@@ -176,14 +177,14 @@ Eine echte Aufnahme (100 % Terminal, keine Mockups):
 │  target/                                                 ││  Atta Troll_ Erweiterte Ausgabe (German Edition 159.9 KiB│
 │  tests/                                                  ││  Bedenke Phlebas - Iain Banks.mobi              810.2 KiB│
 │  .gitignore                                     28 B     ││  besten Erzahlungen des H.P. Lovecraft_ Berge d 988.6 KiB│
-│  Cargo.lock                                     63.2 KiB ││  Blicke windwaerts - Iain Banks.mobi            636.8 KiB│
-│  Cargo.toml                                     688 B    ││  Caesar's Messiah_ The Roman Conspiracy to Inve 1.5 MiB  │
+│  Cargo.lock                                     63.5 KiB ││  Blicke windwaerts - Iain Banks.mobi            636.8 KiB│
+│  Cargo.toml                                     714 B    ││  Caesar's Messiah_ The Roman Conspiracy to Inve 1.5 MiB  │
 │  PLAN.md                                        14.9 KiB ││  Call of Cthulhu_ 67 Tales of Horror by H.P. Lo 1.8 MiB  │
-│  README.md                                      22.0 KiB ││  Can Such Things Be_ - Ambrose Bierce.epub      255.8 KiB│
+│  README.md                                      22.8 KiB ││  Can Such Things Be_ - Ambrose Bierce.epub      255.8 KiB│
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
  American Gods_ Roman (German Edition) - Neil Gaiman.epub   665.6 KiB   2024-12-13 19:56:10   [39.8 GiB free]
  2 marked — Ctrl-C copies them
-Space Mark  Ctrl-A All  Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit  Ctrl-R Reload  Ctrl-S Storage  ? Help
+Space Mark  Ctrl-A All  Ctrl-C Copy  Ctrl-X Move  Ctrl-D Del  Ctrl-N New  Ctrl-Q Quit  ? Help
 ```
 
 ### Tasten
@@ -197,9 +198,11 @@ Space Mark  Ctrl-A All  Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit  Ctrl-R Reload  Ctr
 | `Ctrl-U` | Panels tauschen (Positionen inklusive) |
 | `Ctrl-R` | beide Panels und die Speicher-Metadaten neu laden |
 | `Ctrl-S` | Speicher des aktiven Remote-Panels wählen |
-| `Space` | Datei markieren/entmarkieren, Cursor rückt weiter |
-| `Ctrl-A` | alle Dateien des Ordners markieren (nochmal: alle Markierungen aufheben) |
-| `Ctrl-C` | markierte Dateien kopieren, sonst die Datei unter dem Cursor |
+| `Space` | Eintrag markieren/entmarkieren, Cursor rückt weiter |
+| `Ctrl-A` | alles im Ordner markieren (nochmal: alle Markierungen aufheben) |
+| `Ctrl-C` | markierte Einträge kopieren, sonst den Eintrag unter dem Cursor |
+| `Ctrl-X` | markierte Einträge verschieben (Move), sonst den Eintrag unter dem Cursor |
+| `Ctrl-D` | markierte Einträge löschen (mit Rückfrage) |
 | `Ctrl-N` | Ordner anlegen (Name eintippen, `Enter`, `Esc` bricht ab) |
 | `?` | Hilfe |
 | `Ctrl-Q`, `Esc`, `q` | beenden |
@@ -215,19 +218,27 @@ Abbruch (im Transfer-Dialog bricht `Esc` ab). Einzige Ausnahme ohne `Ctrl` ist `
   ist lokal, das rechte zeigt den Reader (Speicher per `Ctrl-S` wechselbar). Reader → Reader ist
   noch nicht unterstützt (MTP kann nicht streamend zwischen zwei Objekten kopieren) und wird mit
   Hinweis abgelehnt.
-* **Mehrfachauswahl:** `Space` markiert eine Datei (Haken `✓` links, Zähler rechts im Panel-Titel)
-  und rückt den Cursor weiter, `Ctrl-A` markiert alle Dateien des Ordners. Markierungen gelten pro
-  Ordner: beim Wechsel in einen anderen Ordner werden sie geleert, bei `Ctrl-R` bleiben sie für
-  noch vorhandene Dateien erhalten. Ordner lassen sich nicht markieren (keine Rekursion).
-* **Kopieren** (`Ctrl-C`) nutzt denselben Streaming-Kern wie `pull`/`push` und arbeitet die
-  markierten Dateien nacheinander ab (Fortschritt „2/5“, Statuszeile zeigt den Dateinamen). Die
-  Kollisionsprüfung passiert einmal vorab: Existieren Zieldateien, fragt die TUI „Overwrite all“
-  bzw. bei einem einzelnen Lauf „Overwrite“. Taucht während des Laufs doch ein Konflikt auf (z. B.
-  durch ein anderes Programm), fragt sie pro Datei mit „Overwrite“/„Skip“. Am Ende steht eine
-  Zusammenfassung („Copied 3 of 5 files (2 skipped)“). Ein laufender Transfer zeigt einen
-  Fortschrittsdialog, `Esc` bricht die restlichen Dateien ab.
-* **Kein Löschen, kein Umbenennen, keine Rekursion** – wie im CLI-MVP. Ordner werden im Panel
-  angezeigt, aber `Ctrl-C` kopiert nur Dateien.
+* **Mehrfachauswahl:** `Space` markiert einen Eintrag (Haken `✓` links, Zähler rechts im
+  Panel-Titel) und rückt den Cursor weiter, `Ctrl-A` markiert alles im Ordner. Markierungen gelten
+  pro Ordner: beim Wechsel in einen anderen Ordner werden sie geleert, bei `Ctrl-R` bleiben sie für
+  noch vorhandene Einträge erhalten. Nach einem erfolgreichen Transfer verlieren die übertragenen
+  Einträge ihre Markierung; übersprungene behalten sie (ein Tastendruck zum Wiederholen).
+* **Kopieren (`Ctrl-C`) und Verschieben (`Ctrl-X`)** nutzen denselben Streaming-Kern wie
+  `pull`/`push`. **Ordner werden rekursiv** kopiert bzw. verschoben (MTP kennt kein serverseitiges
+  rekursives Kopieren, also läuft es Datei für Datei). Verschieben kopiert zuerst vollständig und
+  löscht die Quelle erst danach; bei lokal → lokal nutzt es `rename`, wenn das Ziel noch nicht
+  existiert. Markierte Einträge werden nacheinander abgearbeitet (Fortschritt „2/5“, Statuszeile
+  zeigt den aktuellen Pfad). Die Kollisionsprüfung passiert einmal vorab: Existieren Zieleinträge,
+  fragt die TUI „Overwrite all“ bzw. bei einem einzelnen Lauf „Overwrite“. Taucht während des Laufs
+  doch ein Konflikt auf (z. B. durch ein anderes Programm), fragt sie pro Eintrag mit
+  „Overwrite“/„Skip“. Am Ende steht eine Zusammenfassung („Copied 3 of 5 entries (2 skipped)“).
+* **Löschen (`Ctrl-D`)** verlangt immer eine Bestätigung („Delete?“/„Cancel“) und zeigt an, wenn
+  Ordner samt Inhalt betroffen sind. Gelöscht wird rekursiv; danach werden die Markierungen der
+  gelöschten Einträge entfernt und das Panel neu geladen. Ein Datei-über-Ordner-Konflikt wird nie
+  stillschweigend „überschrieben“: einen Ordner durch eine Datei zu ersetzen ist bewusst nur über
+  Löschen + Kopieren möglich.
+* **Grenzen:** Reader → Reader bleibt unsupported (Hinweis: lokales Panel dazwischen). `Esc` bricht
+  einen laufenden Transfer bzw. die restlichen Einträge eines Stapels ab.
 * **Nichts blockiert die Oberfläche:** Geräte-I/O läuft in einem eigenen Thread mit eigener
   Tokio-Runtime; die UI verarbeitet währenddessen Tastendrücke und zeichnet Fortschritt.
 * **Freier Platz** wird nach jedem Transfer aktualisiert (Header und Statuszeile).
@@ -273,7 +284,9 @@ src/
   session.rs       UI-unabhängige Fassade: Gerät + Storages + Operationen
   device.rs        USB-Erkennung und strikte Geräteauswahl
   storage.rs       Storage-Metadaten, Alias-Auflösung, Selektoren
+  location.rs      Panel-Orte (lokal oder Storage + Remote-Pfad), im Core für Copy/Move/Delete
   remote_path.rs   Pfadnormalisierung + segmentweises Auflösen (RemoteFs-Trait)
+  tree.rs          rekursives Kopieren, Verschieben und Löschen (Host ↔ Reader)
   transfer.rs      Streaming-Download/-Upload, .part-Handling, Verifikation
   output.rs        Tabellen, Größen/Datum/Namen, Fortschrittszeile
   error.rs         ein Fehlertyp mit Hinweisen und stabilen Exit-Codes
@@ -325,7 +338,11 @@ Die TUI ist bewusst in vier Schichten getrennt:
 
 Tests: Unit-Tests in der Library (inkl. Zustandsautomat und Rendering über `TestBackend`),
 Integrationstests für Pfadregeln und Storage-Auswahl, End-to-End-Tests gegen das virtuelle
-MTP-Gerät sowie ein PTY-Smoke-Test (`scripts/tui-smoke.py`, benötigt echte Hardware und `pyte`).
+MTP-Gerät (`device_integration.rs`) und für rekursive Copy/Move/Delete-Operationen
+(`tree_ops.rs`) sowie ein PTY-Smoke-Test (`scripts/tui-smoke.py`, benötigt echte Hardware und
+`pyte`). Letzterer markiert drei Einträge (zwei Dateien und einen Ordner), kopiert sie als Stapel,
+löscht den Ordner rekursiv auf dem Gerät, lädt eine Datei mit Überschreib-Bestätigung zurück und
+prüft die SHA-256-Summe.
 
 ### Weg zur GUI
 
@@ -393,6 +410,8 @@ Hardware-Checkliste (manuell, mit angeschlossenem Reader):
 4. Kollision ohne `--overwrite` (muss scheitern), mit `--overwrite` (muss gelingen).
 5. Fehlender Pfad, fehlende SD-Karte (`--storage sd` bei eingelegter/entfernter Karte).
 6. USB-Kabel während eines Transfers ziehen — verständliche Fehlermeldung, kein Panic.
+7. TUI: Ordner mit Unterordnern per `Ctrl-C` kopieren, mit `Ctrl-X` verschieben, mit `Ctrl-D`
+   (nach Rückfrage) löschen; Markierungen verschwinden nach dem Transfer.
 
 ## Bewusste Abweichungen vom Plan
 
@@ -404,24 +423,28 @@ Hardware-Checkliste (manuell, mit angeschlossenem Reader):
   atomar per `rename`, remote per Löschen-und-neu-Hochladen (MTP kann nicht atomar ersetzen).
 * **Kein `--json`:** die Datenmodelle (`DirListing`, `StorageEntry`, …) sind dafür vorbereitet, die
   Ausgabe ist aber noch rein menschenlesbar.
-* **TUI ohne Löschen/Umbenennen/Rekursion:** bewusst dieselbe Grenze wie das CLI-MVP. Die
-  Aktionsschicht (`app::Action`) ist so gebaut, dass diese Operationen später ergänzt werden können,
-  ohne die Oberfläche umzubauen.
+* **Löschen, Verschieben und rekursive Ordner gibt es bisher nur in der TUI.** Das CLI bleibt beim
+  Read-only-plus-Push-MVP; die Operationen liegen im Core (`tree.rs`) und können später auch als
+  CLI-Befehle (`rm`, `mv`, `--recursive`) angebunden werden.
+* **Datei ersetzt keinen Ordner:** auch mit `--overwrite` wird ein Ordner nicht durch eine Datei
+  ersetzt; das wäre zu destruktiv für eine einzelne Bestätigung. Ordner ersetzen Dateien dagegen
+  schon (mit Rückfrage).
 * **Streaming-Download über Fenster:** statt einer durchgehenden Bulk-Übertragung nutzt `pull`
   `download_windowed` (4 MiB-Fenster), damit die USB-Session zwischen Fenstern frei bleibt und ein
   Abbruch das Gerät nicht blockiert.
 
 ## Nicht-Ziele des MVP
 
-FUSE-Mount, Hintergrund-Sync, WLAN/BOOXDrop, rekursive Transfers, automatisches Löschen,
-Windows-Support und ein eigener MTP-Protokollstack. Ein `libmtp`-Backend ist als Fallback denkbar,
+FUSE-Mount, Hintergrund-Sync, WLAN/BOOXDrop, automatisches Löschen, Windows-Support und ein eigener
+MTP-Protokollstack. Ein `libmtp`-Backend ist als Fallback denkbar,
 falls ein Gerät mit `mtp-rs` nicht zusammenarbeitet; die Modulgrenzen (`RemoteFs`, `StorageEntry`)
 sind darauf vorbereitet.
 
 ## Getestete Umgebung
 
 * BOOX Go Color 7 (interner Speicher + microSD), macOS, Apple Silicon
-* CLI und TUI (PTY-End-to-End: Upload, Download mit Überschreib-Dialog, Ordner anlegen)
+* CLI und TUI (PTY-End-to-End: Stapel-Kopie inkl. Ordner, rekursives Löschen mit Rückfrage,
+  Download mit Überschreib-Dialog, Ordner anlegen, SHA-256-Roundtrip)
 * `mtp-rs` 0.37, `tokio` 1.x, `ratatui` 0.30, Rust 1.99 (Edition 2024)
 
 Andere BOOX-Modelle oder Firmware-Stände können Storage-Metadaten anders melden. `booxmtp

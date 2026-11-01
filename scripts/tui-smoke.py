@@ -8,8 +8,8 @@ package for screen parsing:
     .venv/bin/pip install pyte
     .venv/bin/python scripts/tui-smoke.py --work /tmp/booxmtp-tui-smoke
 
-The script owns its fixture directory: it creates `smoke.bin` and `note.txt` if they are missing
-and removes every other entry, so a previous interrupted run cannot shift the selection. Everything it creates on the
+The script owns its fixture directory: it creates `smoke.bin`, `note.txt` and a small `tree/`
+folder, and removes every other entry, so a previous interrupted run cannot shift the selection. Everything it creates on the
 device lives in the storage root under a unique name and is printed at the end so you can delete it
 manually (the CLI has no `rm` yet).
 """
@@ -148,7 +148,7 @@ def main() -> int:
     os.makedirs(options.work, exist_ok=True)
     fixture = os.path.join(options.work, "smoke.bin")
     for entry in os.listdir(options.work):
-        if entry in ("smoke.bin", "note.txt"):
+        if entry in ("smoke.bin", "note.txt", "tree"):
             continue
         path = os.path.join(options.work, entry)
         if os.path.isdir(path) and not os.path.islink(path):
@@ -163,6 +163,9 @@ def main() -> int:
     note = os.path.join(options.work, "note.txt")
     with open(note, "w", encoding="utf-8") as handle:
         handle.write("booxmtp tui smoke test\n")
+    os.makedirs(os.path.join(options.work, "tree", "sub"), exist_ok=True)
+    with open(os.path.join(options.work, "tree", "sub", "inner.txt"), "w", encoding="utf-8") as handle:
+        handle.write("nested\n")
     before = hashlib.sha256(open(fixture, "rb").read()).hexdigest()
     folder_name = f"booxmtp-tui-smoke-{os.getpid()}"
 
@@ -183,33 +186,53 @@ def main() -> int:
     check("remote panel", tui.wait_for(f"{options.storage}:"))
     check("key bar", tui.wait_for("Space Mark") and tui.wait_for("Ctrl-C Copy"))
 
-    # 1) Upload: mark both fixture files with Ctrl-A and copy the batch.
+    # 1) Upload: mark everything with Ctrl-A (two files and a folder) and copy the batch.
     check("fixtures listed", "smoke.bin" in tui.panel_text("left"))
-    tui.send(b"\x01")  # Ctrl-A = mark all files
+    tui.send(b"\x01")  # Ctrl-A = mark everything
     check("marks are visible", tui.wait_for("✓ smoke.bin"))
-    tui.send(b"\x03")  # Ctrl-C = copy marked files
+    tui.send(b"\x03")  # Ctrl-C = copy marked entries
     # Leftovers from an earlier run trigger the overwrite dialog: accept them.
-    for _ in range(40):
-        if "Copied 2 files" in tui.text():
+    for _ in range(60):
+        if "Copied 3 entries" in tui.text():
             break
         if "Overwrite?" in tui.text():
             tui.send(b"y", 0.5)
         tui.pump(0.5)
-    check("batch copy finished", tui.wait_for("Copied 2 files"))
+    check("batch copy finished", tui.wait_for("Copied 3 entries"))
     check(
-        "remote panel shows both files",
-        tui.wait_for_panel("right", "smoke.bin") and tui.wait_for_panel("right", "note.txt"),
+        "remote panel shows all entries",
+        tui.wait_for_panel("right", "smoke.bin")
+        and tui.wait_for_panel("right", "note.txt")
+        and tui.wait_for_panel("right", "tree/"),
+    )
+    check(
+        "marks are cleared after the copy",
+        "✓" not in tui.panel_text("left"),
     )
 
-    # 2) Download with overwrite confirmation.
-    tui.send(b"\t")
-    tui.send(b"\x1b[F")  # End
+    # 2) Delete the uploaded folder recursively on the device.
+    tui.send(b"\t")  # focus the remote panel
+    rows = tui.panel_text("right").splitlines()
+    row = next(i for i, line in enumerate(rows) if "tree/" in line) - 2
+    tui.send(b"\x1b[H", 0.3)  # Home
+    for _ in range(max(row, 0)):
+        tui.send(b"\x1b[B", 0.08)
+    tui.send(b"\x04")  # Ctrl-D = delete
+    check("delete confirmation", tui.wait_for("Delete?"))
+    tui.send(b"y")
+    check("delete finished", tui.wait_for("Deleted"))
+    tui.send(b"\x12", 3.0)  # Ctrl-R
+    check("folder is gone from the device", "tree/" not in tui.panel_text("right"))
+
+    # 3) Download with overwrite confirmation (the remote panel is still active).
+    tui.send(b"\x1b[F")  # End -> last entry (smoke.bin)
+    check("remote cursor on smoke.bin", "smoke.bin" in tui.panel_text("right"))
     tui.send(b"\x03")  # Ctrl-C = copy
     check("overwrite dialog", tui.wait_for("Overwrite?"))
     tui.send(b"y")
-    check("download finished", tui.wait_for("Downloaded /smoke.bin"))
+    check("download finished", tui.wait_for("Copied smoke.bin"))
 
-    # 3) Create a folder on the device.
+    # 4) Create a folder on the device.
     tui.send(b"\x0e")  # Ctrl-N = new folder
     check("mkdir dialog", tui.wait_for("Create folder"))
     tui.send(folder_name.encode())
@@ -218,7 +241,7 @@ def main() -> int:
     tui.send(b"\x12", 2.0)  # Ctrl-R
     check("new folder listed", tui.wait_for_panel("right", f"{folder_name}/"))
 
-    # 4) Help and clean shutdown.
+    # 5) Help and clean shutdown.
     tui.send(b"?")  # help
     check("help", tui.wait_for("Navigation"))
     tui.send(b"\x1b")

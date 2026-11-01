@@ -15,31 +15,50 @@
 //! [`Event::Progress`] and can be cancelled without waiting for the worker to become idle, because
 //! cancellation goes through a shared [`CancelToken`] rather than a channel message.
 
-use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use mtp_rs::CancelToken;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc as async_mpsc;
 
-use crate::error::{Error, IoResultExt, Result};
-use crate::output::format_bytes;
+use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::storage::StorageEntry;
-use crate::transfer::{self, TransferOptions, TransferProgress};
+use crate::transfer::{TransferOptions, TransferProgress};
+use crate::tree::{self, DeleteSummary};
 
 use super::entry::{FileEntry, Location, PanelId, read_local_dir};
 
-/// Chunk size for host-to-host copies (keeps progress smooth and memory flat).
-const LOCAL_COPY_CHUNK: usize = 256 * 1024;
+/// Whether a transfer copies or moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferMode {
+    /// Leave the source in place.
+    Copy,
+    /// Remove the source after a successful copy.
+    Move,
+}
 
-/// How often progress events are emitted for host-to-host copies.
-const LOCAL_PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
+impl TransferMode {
+    /// Verb for status messages (`Copying…`, `Moving…`).
+    pub fn present_participle(self) -> &'static str {
+        match self {
+            TransferMode::Copy => "Copying",
+            TransferMode::Move => "Moving",
+        }
+    }
 
-/// A copy job, as prepared by the UI.
+    /// Verb for finished messages (`Copied…`, `Moved…`).
+    pub fn past_tense(self) -> &'static str {
+        match self {
+            TransferMode::Copy => "Copied",
+            TransferMode::Move => "Moved",
+        }
+    }
+}
+
+/// A transfer job (copy or move), as prepared by the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyRequest {
     /// Panel the file comes from (for reloading and messages).
@@ -54,6 +73,8 @@ pub struct CopyRequest {
     pub destination: Location,
     /// Whether an existing target may be replaced.
     pub overwrite: bool,
+    /// Copy or move.
+    pub mode: TransferMode,
 }
 
 impl CopyRequest {
@@ -73,8 +94,17 @@ pub enum Request {
         /// Folder to read.
         location: Location,
     },
-    /// Copy one file between the two panel locations.
-    Copy(CopyRequest),
+    /// Copy or move one file or folder tree between the panel locations.
+    Transfer(CopyRequest),
+    /// Delete the named entries of a folder.
+    Delete {
+        /// Panel whose listing should be reloaded.
+        panel: PanelId,
+        /// Folder that contains the entries.
+        location: Location,
+        /// Names to delete (files or folders, recursively).
+        names: Vec<String>,
+    },
     /// Create a folder inside `location`.
     CreateDir {
         /// Panel the folder belongs to.
@@ -118,12 +148,21 @@ pub enum Event {
         /// Optional suggestion.
         hint: Option<String>,
     },
-    /// A copy finished successfully.
-    CopyFinished {
+    /// A copy or move finished successfully.
+    TransferFinished {
         /// Source panel (reload).
         source_panel: PanelId,
         /// Destination panel (reload).
         destination_panel: PanelId,
+        /// Name of the transferred entry (used to clear its mark).
+        source_name: String,
+        /// Message for the status line.
+        message: String,
+    },
+    /// A delete finished successfully.
+    DeleteFinished {
+        /// Panel whose listing should be reloaded.
+        panel: PanelId,
         /// Message for the status line.
         message: String,
     },
@@ -240,9 +279,18 @@ impl WorkerHandle {
         self.send(Request::List { panel, location });
     }
 
-    /// Ask for a copy.
-    pub fn copy(&self, request: CopyRequest) {
-        self.send(Request::Copy(request));
+    /// Ask for a copy or move.
+    pub fn transfer(&self, request: CopyRequest) {
+        self.send(Request::Transfer(request));
+    }
+
+    /// Ask for deleting the named entries of a folder.
+    pub fn delete(&self, panel: PanelId, location: Location, names: Vec<String>) {
+        self.send(Request::Delete {
+            panel,
+            location,
+            names,
+        });
     }
 
     /// Ask for a new folder.
@@ -329,9 +377,14 @@ async fn worker_main(
                     Err(error) => failure(Some(panel), error),
                 });
             }
-            Request::Copy(request) => {
-                handle_copy(&mut session, &events, &cancel, request).await;
+            Request::Transfer(request) => {
+                handle_transfer(&mut session, &events, &cancel, request).await;
             }
+            Request::Delete {
+                panel,
+                location,
+                names,
+            } => handle_delete(&mut session, &events, &cancel, panel, &location, &names).await,
             Request::CreateDir {
                 panel,
                 location,
@@ -372,15 +425,24 @@ async fn load_entries(session: &Session, location: &Location) -> Result<Vec<File
     }
 }
 
-/// Execute a copy job and report the outcome.
-async fn handle_copy(
+/// Execute a copy/move job and report the outcome.
+async fn handle_transfer(
     session: &mut Session,
     events: &Sender<Event>,
     cancel: &CancelSlot,
     request: CopyRequest,
 ) {
+    let Some(destination) = request.destination_file() else {
+        let _ = events.send(Event::Failure {
+            panel: Some(request.source_panel),
+            message: format!("`{}` is not a valid file name", request.source_name),
+            hint: None,
+        });
+        return;
+    };
+
     // Remote-to-remote would need an on-device copy; refuse instead of pretending.
-    if request.source.is_remote() && request.destination.is_remote() {
+    if request.source.is_remote() && destination.is_remote() {
         let _ = events.send(Event::Failure {
             panel: Some(request.source_panel),
             message: "Copying between two remote folders is not supported yet".to_string(),
@@ -391,24 +453,50 @@ async fn handle_copy(
         return;
     }
 
-    let Some(destination) = request.destination_file() else {
-        let _ = events.send(Event::Failure {
-            panel: Some(request.source_panel),
-            message: format!("`{}` is not a valid file name", request.source_name),
-            hint: None,
-        });
-        return;
-    };
-
     let token = cancel.arm();
-    let outcome = perform_copy(session, events, &request, &destination, &token).await;
+    let options = TransferOptions {
+        overwrite: request.overwrite,
+        cancel: Some(token.clone()),
+    };
+    let mut progress = progress_reporter(events);
+    let outcome = match request.mode {
+        TransferMode::Copy => {
+            tree::copy(
+                session,
+                &request.source,
+                &destination,
+                &options,
+                &mut progress,
+            )
+            .await
+        }
+        TransferMode::Move => {
+            tree::move_entry(
+                session,
+                &request.source,
+                &destination,
+                &options,
+                &mut progress,
+            )
+            .await
+        }
+    };
     cancel.disarm();
 
     match outcome {
-        Ok(message) => {
-            let _ = events.send(Event::CopyFinished {
+        Ok(summary) => {
+            let message = format!(
+                "{} {} → {} ({})",
+                request.mode.past_tense(),
+                request.source_name,
+                destination.display_path(),
+                summary.describe()
+            );
+            tracing::debug!(%message, "transfer finished");
+            let _ = events.send(Event::TransferFinished {
                 source_panel: request.source_panel,
                 destination_panel: request.destination_panel,
+                source_name: request.source_name,
                 message,
             });
             refresh_storages_quietly(session, events).await;
@@ -429,157 +517,57 @@ async fn handle_copy(
     }
 }
 
-/// The copy itself: host↔reader through the streaming transfer layer, host↔host in chunks.
-async fn perform_copy(
-    session: &Session,
+/// Delete the named entries of a folder, one after another.
+async fn handle_delete(
+    session: &mut Session,
     events: &Sender<Event>,
-    request: &CopyRequest,
-    destination: &Location,
-    token: &CancelToken,
-) -> Result<String> {
-    let options = TransferOptions {
-        overwrite: request.overwrite,
-        cancel: Some(token.clone()),
-    };
+    cancel: &CancelSlot,
+    panel: PanelId,
+    location: &Location,
+    names: &[String],
+) {
+    let token = cancel.arm();
+    let mut summary = DeleteSummary::default();
+    let mut outcome: Result<()> = Ok(());
 
-    match (&request.source, destination) {
-        (Location::Local(from), Location::Local(to)) => {
-            copy_local_file(from, to, &options, events).await?;
-            Ok(format!("Copied {} → {}", request.source_name, to.display()))
-        }
-        (Location::Local(from), Location::Remote { storage, path }) => {
-            let mut on_progress = progress_reporter(events, &request.source_name);
-            let report = session
-                .upload_file(storage.id, from, path, &options, &mut on_progress)
-                .await?;
-            Ok(format!(
-                "Uploaded {} ({}) → {}",
-                request.source_name,
-                format_bytes(report.bytes),
-                path.display()
-            ))
-        }
-        (
-            Location::Remote {
-                storage,
-                path: source,
-            },
-            Location::Local(to),
-        ) => {
-            let mut on_progress = progress_reporter(events, &request.source_name);
-            let report = session
-                .download_file(storage.id, source, to, &options, &mut on_progress)
-                .await?;
-            Ok(format!(
-                "Downloaded {} ({}) → {}",
-                source.display(),
-                format_bytes(report.bytes),
-                to.display()
-            ))
-        }
-        (Location::Remote { .. }, Location::Remote { .. }) => {
-            // Guarded by the caller; kept as a defensive fallback.
-            Err(Error::invalid_remote_path(
-                request.source.display_path(),
-                "copying between two remote folders is not supported",
-            ))
-        }
-    }
-}
-
-/// Stream a host file into a `.part` file and move it into place.
-async fn copy_local_file(
-    from: &Path,
-    to: &Path,
-    options: &TransferOptions,
-    events: &Sender<Event>,
-) -> Result<()> {
-    if std::fs::symlink_metadata(to).is_ok() && !options.overwrite {
-        return Err(Error::LocalAlreadyExists {
-            path: to.to_path_buf(),
-        });
-    }
-
-    let partial = transfer::partial_path(to);
-    let outcome = stream_local_copy(from, to, &partial, options, events).await;
-    if outcome.is_err() {
-        let _ = tokio::fs::remove_file(&partial).await;
-    }
-    outcome
-}
-
-async fn stream_local_copy(
-    from: &Path,
-    to: &Path,
-    partial: &Path,
-    options: &TransferOptions,
-    events: &Sender<Event>,
-) -> Result<()> {
-    let mut source = tokio::fs::File::open(from)
-        .await
-        .io_context(format!("opening `{}`", from.display()))?;
-    let total = source.metadata().await.ok().map(|metadata| metadata.len());
-    let mut sink = tokio::fs::File::create(partial)
-        .await
-        .io_context(format!("creating `{}`", partial.display()))?;
-
-    let label = to
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| to.display().to_string());
-    let mut buffer = vec![0u8; LOCAL_COPY_CHUNK];
-    let mut transferred = 0u64;
-    let mut last_emit = Instant::now() - LOCAL_PROGRESS_INTERVAL;
-
-    loop {
-        if options
-            .cancel
-            .as_ref()
-            .is_some_and(CancelToken::is_cancelled)
-        {
-            return Err(Error::Cancelled);
-        }
-        let read = source
-            .read(&mut buffer)
-            .await
-            .io_context(format!("reading `{}`", from.display()))?;
-        if read == 0 {
+    for name in names {
+        let Some(target) = location.child(name) else {
+            outcome = Err(Error::invalid_remote_path(
+                location.display_path(),
+                format!("`{name}` is not a valid name"),
+            ));
             break;
-        }
-        sink.write_all(&buffer[..read])
-            .await
-            .io_context(format!("writing `{}`", partial.display()))?;
-        transferred += read as u64;
-        if last_emit.elapsed() >= LOCAL_PROGRESS_INTERVAL {
-            last_emit = Instant::now();
-            let _ = events.send(Event::Progress {
-                label: label.clone(),
-                transferred,
-                total,
-            });
+        };
+        match tree::remove(session, &target, Some(&token)).await {
+            Ok(removed) => summary += removed,
+            Err(error) => {
+                outcome = Err(error);
+                break;
+            }
         }
     }
+    cancel.disarm();
 
-    sink.flush()
-        .await
-        .io_context(format!("flushing `{}`", partial.display()))?;
-    drop(sink);
-    let _ = events.send(Event::Progress {
-        label,
-        transferred,
-        total,
-    });
-
-    if !options.overwrite && to.exists() {
-        return Err(Error::LocalAlreadyExists {
-            path: to.to_path_buf(),
-        });
+    match outcome {
+        Ok(()) => {
+            let label = if names.len() == 1 {
+                format!("`{}`", names[0])
+            } else {
+                format!("{} items", names.len())
+            };
+            let message = format!("Deleted {label} ({})", summary.describe());
+            tracing::debug!(%message, "delete finished");
+            let _ = events.send(Event::DeleteFinished { panel, message });
+            refresh_storages_quietly(session, events).await;
+        }
+        Err(Error::Cancelled) => {
+            let _ = events.send(Event::Cancelled);
+            refresh_storages_quietly(session, events).await;
+        }
+        Err(error) => {
+            let _ = events.send(failure(Some(panel), error));
+        }
     }
-    std::fs::rename(partial, to).io_context(format!(
-        "moving `{}` to `{}`",
-        partial.display(),
-        to.display()
-    ))
 }
 
 /// Create a folder on the host or the device.
@@ -637,16 +625,12 @@ fn failure(panel: Option<PanelId>, error: Error) -> Event {
     }
 }
 
-/// Progress callback that forwards samples to the UI thread.
-fn progress_reporter<'a>(
-    events: &Sender<Event>,
-    label: &str,
-) -> impl FnMut(TransferProgress) + Send + 'a {
+/// Progress callback that forwards per-file samples to the UI thread.
+fn progress_reporter(events: &Sender<Event>) -> impl FnMut(&str, TransferProgress) + Send + '_ {
     let events = events.clone();
-    let label = label.to_string();
-    move |progress: TransferProgress| {
+    move |label: &str, progress: TransferProgress| {
         let _ = events.send(Event::Progress {
-            label: label.clone(),
+            label: label.to_string(),
             transferred: progress.transferred,
             total: progress.total,
         });

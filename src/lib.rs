@@ -6,8 +6,10 @@
 //! |--------|----------------|
 //! | [`device`] | USB discovery and strict device selection |
 //! | [`storage`] | storage metadata and `internal`/`sd` alias resolution |
+//! | [`location`] | a panel target: a host folder or a storage + remote path |
 //! | [`remote_path`] | normalisation and segment-wise resolution of remote paths |
 //! | [`transfer`] | streaming download/upload, atomic local writes, verification |
+//! | [`tree`] | recursive copy, move and delete across host and reader |
 //! | [`session`] | UI-agnostic façade tying the above together |
 //! | [`output`] | byte/date/name formatting, tables, progress line |
 //! | [`error`] | one error type with hints and stable exit codes |
@@ -43,14 +45,17 @@
 pub mod cli;
 pub mod device;
 pub mod error;
+pub mod location;
 pub mod output;
 pub mod remote_path;
 pub mod session;
 pub mod storage;
 pub mod transfer;
+pub mod tree;
 pub mod tui;
 
 pub use error::{Error, Result};
+pub use location::Location;
 pub use remote_path::{DirListing, EntryKind, RemoteEntry, RemotePath};
 pub use session::{Session, StorageHandle};
 pub use storage::{StorageAlias, StorageCatalog, StorageEntry, StorageSelector};

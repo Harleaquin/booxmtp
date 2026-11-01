@@ -128,9 +128,10 @@ appended. A target without a trailing slash is used verbatim.")]
     /// Open the two-panel terminal file manager (Midnight-Commander style).
     #[command(after_help = "\
 Keys: arrows/Home/End/PgUp/PgDn move, Enter opens a folder, Backspace goes up, Tab switches \
-panels, Ctrl-C copies the selected file to the other panel, Ctrl-N creates a folder, Ctrl-Q quits, \
-? shows help, Ctrl-S changes the storage of the active remote panel. No function keys are used. \
-With -v, diagnostics are written to the file shown in the help screen (not to the terminal).")]
+panels, Space marks an entry, Ctrl-A marks everything, Ctrl-C copies, Ctrl-X moves, Ctrl-D deletes \
+(asks first), Ctrl-N creates a folder, Ctrl-Q quits, ? shows help, Ctrl-S changes the storage of \
+the active remote panel. Folders are copied, moved and deleted recursively. No function keys are \
+used. With -v, diagnostics are written to the file shown in the help screen (not the terminal).")]
     Tui {
         /// Storage to show in the right panel on startup (default: internal).
         #[arg(short, long, value_name = "STORAGE")]
