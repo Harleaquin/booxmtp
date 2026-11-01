@@ -94,12 +94,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_key_bar(frame: &mut Frame, area: Rect) {
     let keys = [
+        ("Space", "Mark"),
+        ("Ctrl-A", "All"),
         ("Ctrl-C", "Copy"),
         ("Ctrl-N", "New"),
         ("Ctrl-Q", "Quit"),
         ("Ctrl-R", "Reload"),
         ("Ctrl-S", "Storage"),
-        ("Ctrl-U", "Swap"),
         ("?", "Help"),
     ];
     let mut spans = Vec::new();
@@ -193,23 +194,34 @@ fn draw_panel(frame: &mut Frame, app: &App, id: PanelId, area: Rect) {
         Style::new().fg(MUTED)
     };
 
-    let mut title = format!(" {} ", panel.location.title());
+    let mut title = format!(" {}", panel.location.title());
     if panel.loading {
-        title.push_str("· loading ");
+        title.push_str("  · loading");
     }
     if panel.error.is_some() {
-        title.push_str("· error ");
+        title.push_str("  · error");
     }
+    title.push(' ');
     let title_style = if is_active {
         Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(Color::Gray)
     };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)
-        .title(Line::from(Span::styled(title, title_style)));
+        .title_top(Line::from(Span::styled(title, title_style)));
+    // Right-aligned, so a long path on the left cannot hide the mark counter.
+    if panel.marked_count() > 0 {
+        block = block.title_top(
+            Line::from(Span::styled(
+                format!(" [{} marked] ", panel.marked_count()),
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
 
     if panel.entries.is_empty() {
         let message = if panel.loading {
@@ -228,19 +240,27 @@ fn draw_panel(frame: &mut Frame, app: &App, id: PanelId, area: Rect) {
     }
 
     let rows = panel.entries.iter().map(|entry| {
+        // Two-character gutter: a check mark for marked files, blanks otherwise, so names line up.
+        let marked = panel.is_marked(&entry.name);
+        let marker = if marked { "✓ " } else { "  " };
         let name_style = if entry.is_dir() {
             Style::new().fg(DIRECTORY)
+        } else if marked {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         };
         let size = entry.size.map(format_bytes).unwrap_or_default();
         Row::new(vec![
-            Cell::from(Span::styled(entry.display_name(), name_style)),
+            Cell::from(Span::styled(
+                format!("{marker}{}", entry.display_name()),
+                name_style,
+            )),
             Cell::from(Span::styled(size, Style::new().fg(MUTED))),
         ])
     });
 
-    let table = Table::new(rows, [Constraint::Min(10), Constraint::Length(9)])
+    let table = Table::new(rows, [Constraint::Min(12), Constraint::Length(9)])
         .block(block)
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
@@ -305,25 +325,31 @@ fn draw_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 dialog_content_area(rect),
             );
         }
-        Dialog::ConfirmOverwrite { message, yes, .. } => {
-            let rect = centered_rect(66, 10, area);
-            render_dialog_frame(
-                frame,
-                "Overwrite?",
-                Style::new().fg(Color::LightYellow),
-                rect,
-            );
+        Dialog::Confirm {
+            title,
+            message,
+            yes_label,
+            no_label,
+            yes,
+            ..
+        } => {
+            let rect = centered_rect(70, 10, area);
+            render_dialog_frame(frame, title, Style::new().fg(Color::LightYellow), rect);
+            let selected = Style::new().bg(ACCENT).fg(Color::Black);
+            let idle = Style::new().fg(MUTED);
+            let yes_button = format!(" [ {yes_label} ] ");
+            let no_button = format!(" [ {no_label} ] ");
             let buttons = if *yes {
                 Line::from(vec![
-                    Span::styled(" [ Yes ] ", Style::new().bg(ACCENT).fg(Color::Black)),
+                    Span::styled(yes_button, selected),
                     Span::raw("   "),
-                    Span::styled(" No ", Style::new().fg(MUTED)),
+                    Span::styled(no_button, idle),
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled(" Yes ", Style::new().fg(MUTED)),
+                    Span::styled(yes_button, idle),
                     Span::raw("   "),
-                    Span::styled(" [ No ] ", Style::new().bg(ACCENT).fg(Color::Black)),
+                    Span::styled(no_button, selected),
                 ])
             };
             let text = Text::from(vec![
@@ -458,8 +484,12 @@ fn draw_help(frame: &mut Frame, scroll: u16, area: Rect) {
         "  Ctrl-R          reload both panels",
         "  Ctrl-S          choose storage (remote panel)",
         "",
+        "Selection",
+        "  Space           mark/unmark the file, then move down",
+        "  Ctrl-A          mark all files (press again: clear all)",
+        "",
         "Files",
-        "  Ctrl-C          copy selected file to the other panel",
+        "  Ctrl-C          copy marked files, or the file under the cursor",
         "  Ctrl-N          create a folder",
         "",
         "Other",
@@ -668,8 +698,23 @@ mod tests {
         );
         assert!(screen.contains("local.txt"), "file missing:\n{screen}");
         assert!(screen.contains("Books/"), "folder missing:\n{screen}");
+        assert!(screen.contains("Space Mark"), "key bar missing:\n{screen}");
         assert!(screen.contains("Ctrl-C Copy"), "key bar missing:\n{screen}");
         assert!(screen.contains("Ctrl-Q Quit"), "key bar missing:\n{screen}");
+    }
+
+    #[test]
+    fn marked_files_show_a_check_mark_and_a_counter() {
+        let mut app = app_with_listing();
+        app.active = PanelId::Left;
+        app.panels[0].selected = 1; // local.txt
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char(' '),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        let screen = render(&mut app, 100, 24);
+        assert!(screen.contains("✓ local.txt"), "marker missing:\n{screen}");
+        assert!(screen.contains("[1 marked]"), "counter missing:\n{screen}");
     }
 
     #[test]
@@ -681,7 +726,7 @@ mod tests {
         ));
         let screen = render(&mut app, 100, 30);
         assert!(screen.contains("Help"), "help title missing:\n{screen}");
-        assert!(screen.contains("Ctrl-N"), "help body missing:\n{screen}");
+        assert!(screen.contains("Ctrl-A"), "help body missing:\n{screen}");
     }
 
     #[test]

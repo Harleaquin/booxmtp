@@ -8,8 +8,8 @@ package for screen parsing:
     .venv/bin/pip install pyte
     .venv/bin/python scripts/tui-smoke.py --work /tmp/booxmtp-tui-smoke
 
-The script owns its fixture directory: it creates `smoke.bin` if it is missing and removes every
-other entry, so a previous interrupted run cannot shift the selection. Everything it creates on the
+The script owns its fixture directory: it creates `smoke.bin` and `note.txt` if they are missing
+and removes every other entry, so a previous interrupted run cannot shift the selection. Everything it creates on the
 device lives in the storage root under a unique name and is printed at the end so you can delete it
 manually (the CLI has no `rm` yet).
 """
@@ -148,7 +148,7 @@ def main() -> int:
     os.makedirs(options.work, exist_ok=True)
     fixture = os.path.join(options.work, "smoke.bin")
     for entry in os.listdir(options.work):
-        if entry == "smoke.bin":
+        if entry in ("smoke.bin", "note.txt"):
             continue
         path = os.path.join(options.work, entry)
         if os.path.isdir(path) and not os.path.islink(path):
@@ -160,6 +160,9 @@ def main() -> int:
     if not os.path.exists(fixture):
         with open(fixture, "wb") as handle:
             handle.write(os.urandom(64 * 1024))
+    note = os.path.join(options.work, "note.txt")
+    with open(note, "w", encoding="utf-8") as handle:
+        handle.write("booxmtp tui smoke test\n")
     before = hashlib.sha256(open(fixture, "rb").read()).hexdigest()
     folder_name = f"booxmtp-tui-smoke-{os.getpid()}"
 
@@ -178,17 +181,25 @@ def main() -> int:
     check("local panel", tui.wait_for("Local:"))
     check("device header", tui.wait_for("serial"))
     check("remote panel", tui.wait_for(f"{options.storage}:"))
-    check("key bar", tui.wait_for("Ctrl-C Copy"))
+    check("key bar", tui.wait_for("Space Mark") and tui.wait_for("Ctrl-C Copy"))
 
-    # 1) Upload: ".." is selected; one Down selects the fixture file.
-    tui.send(b"\x1b[B")
-    check("fixture listed", "smoke.bin" in tui.panel_text("left"))
-    tui.send(b"\x03")  # Ctrl-C = copy
-    # A leftover `/smoke.bin` from an earlier run triggers the overwrite dialog: accept it.
-    if tui.wait_for("Overwrite?", timeout=5):
-        tui.send(b"y")
-    check("upload finished", tui.wait_for("Uploaded smoke.bin"))
-    check("remote panel shows the file", tui.wait_for_panel("right", "smoke.bin"))
+    # 1) Upload: mark both fixture files with Ctrl-A and copy the batch.
+    check("fixtures listed", "smoke.bin" in tui.panel_text("left"))
+    tui.send(b"\x01")  # Ctrl-A = mark all files
+    check("marks are visible", tui.wait_for("✓ smoke.bin"))
+    tui.send(b"\x03")  # Ctrl-C = copy marked files
+    # Leftovers from an earlier run trigger the overwrite dialog: accept them.
+    for _ in range(40):
+        if "Copied 2 files" in tui.text():
+            break
+        if "Overwrite?" in tui.text():
+            tui.send(b"y", 0.5)
+        tui.pump(0.5)
+    check("batch copy finished", tui.wait_for("Copied 2 files"))
+    check(
+        "remote panel shows both files",
+        tui.wait_for_panel("right", "smoke.bin") and tui.wait_for_panel("right", "note.txt"),
+    )
 
     # 2) Download with overwrite confirmation.
     tui.send(b"\t")
@@ -223,7 +234,7 @@ def main() -> int:
         return 1
 
     print("TUI smoke test passed")
-    print(f"device leftovers to remove manually: /smoke.bin, /{folder_name}")
+    print(f"device leftovers to remove manually: /smoke.bin, /note.txt, /{folder_name}")
     return 0
 
 

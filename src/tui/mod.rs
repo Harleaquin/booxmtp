@@ -9,7 +9,7 @@
 //! ├───────────────────────────┴───────────────────────────────────────────────┤
 //! │ Roman.epub   1.2 MiB   2026-11-01 14:46      [40.8 GiB free]             │
 //! │ Copied Roman.epub (1.2 MiB) → /Books                                      │
-//! │ Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit  Ctrl-R Reload  Ctrl-S Storage …    │
+//! │ Space Mark  Ctrl-A All  Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit …           │
 //! └───────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!

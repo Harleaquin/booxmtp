@@ -4,6 +4,7 @@
 //! returns [`Action`]s that the event loop forwards to the worker. That separation is what makes
 //! the panel logic and every dialog testable without a terminal, a device or threads.
 
+use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -39,6 +40,11 @@ pub struct Panel {
     pub viewport_rows: usize,
     /// Last listing error, kept while the previous contents stay visible.
     pub error: Option<String>,
+    /// Marked file names (multi-selection), independent of the cursor.
+    ///
+    /// Names, not indices: a reload may reorder or re-fetch the listing, and marks should follow
+    /// the file, not the row.
+    pub marked: BTreeSet<String>,
 }
 
 impl Panel {
@@ -51,7 +57,29 @@ impl Panel {
             loading: false,
             viewport_rows: 10,
             error: None,
+            marked: BTreeSet::new(),
         }
+    }
+
+    /// Whether `name` is marked for a batch copy.
+    pub fn is_marked(&self, name: &str) -> bool {
+        self.marked.contains(name)
+    }
+
+    /// Number of marked entries.
+    pub fn marked_count(&self) -> usize {
+        self.marked.len()
+    }
+
+    /// Drop marks whose file is no longer in the listing.
+    fn prune_marks(&mut self) {
+        let present: BTreeSet<String> = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_parent() && !entry.is_dir())
+            .map(|entry| entry.name.clone())
+            .collect();
+        self.marked.retain(|name| present.contains(name));
     }
 
     /// The selected row, if any.
@@ -119,12 +147,18 @@ pub enum Dialog {
         /// Style it as an error rather than information.
         is_error: bool,
     },
-    /// “Overwrite?” confirmation.
-    ConfirmOverwrite {
-        /// The copy job, retried with `overwrite = true` when confirmed.
-        request: CopyRequest,
-        /// Path that already exists.
+    /// Confirmation with two labelled buttons.
+    Confirm {
+        /// Dialog title.
+        title: String,
+        /// Main text.
         message: String,
+        /// Label of the confirming button.
+        yes_label: String,
+        /// Label of the declining button.
+        no_label: String,
+        /// What confirming does.
+        action: ConfirmAction,
         /// Currently highlighted button.
         yes: bool,
     },
@@ -151,6 +185,40 @@ pub enum Dialog {
         /// Highlighted entry in [`App::storages`].
         selected: usize,
     },
+}
+
+/// What confirming a [`Dialog::Confirm`] does.
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// Start a batch copy; every request is sent with `overwrite = true`.
+    CopyAll {
+        /// Files to copy (marked ones, or the file under the cursor).
+        requests: Vec<CopyRequest>,
+    },
+    /// Retry the file that caused a mid-batch conflict, then continue the batch.
+    OverwriteOne {
+        /// The rejected job, re-sent with `overwrite = true`.
+        ///
+        /// Boxed so a whole [`CopyRequest`] does not inflate the [`Dialog`] value.
+        request: Box<CopyRequest>,
+    },
+}
+
+/// A multi-file copy in progress.
+#[derive(Debug)]
+struct BatchCopy {
+    /// Files that still have to be sent (the current one is already in flight).
+    queue: VecDeque<CopyRequest>,
+    /// Number of files the user selected.
+    total: usize,
+    /// Files copied successfully so far.
+    completed: usize,
+    /// Files skipped because the user declined to overwrite them.
+    skipped: usize,
+    /// Panel to reload when the batch ends.
+    source_panel: PanelId,
+    /// Panel to reload when the batch ends.
+    destination_panel: PanelId,
 }
 
 /// What an [`Dialog::Input`] produces.
@@ -265,6 +333,8 @@ pub struct App {
     pub busy: bool,
     /// Set to leave the event loop.
     pub should_quit: bool,
+    /// Multi-file copy in progress, if any.
+    batch: Option<BatchCopy>,
 }
 
 impl App {
@@ -284,6 +354,7 @@ impl App {
             progress: None,
             busy: false,
             should_quit: false,
+            batch: None,
         }
     }
 
@@ -340,7 +411,31 @@ impl App {
                     hint,
                     is_error: true,
                 });
-                Vec::new()
+
+                // An aborted batch may already have copied some files: refresh the views so they
+                // reflect what is actually on disk/device.
+                match self.batch.take() {
+                    Some(batch) => {
+                        if batch.total > 1 {
+                            self.status = format!(
+                                "Copy aborted after {} of {} files",
+                                batch.completed, batch.total
+                            );
+                        }
+                        vec![
+                            Action::list(
+                                batch.source_panel,
+                                &self.panel(batch.source_panel).location,
+                            ),
+                            Action::list(
+                                batch.destination_panel,
+                                &self.panel(batch.destination_panel).location,
+                            ),
+                            Action::RefreshStorages,
+                        ]
+                    }
+                    None => Vec::new(),
+                }
             }
             Event::CopyFinished {
                 source_panel,
@@ -350,6 +445,14 @@ impl App {
                 self.busy = false;
                 self.progress = None;
                 self.close_progress_dialog();
+
+                if self.batch.is_some() {
+                    if let Some(batch) = &mut self.batch {
+                        batch.completed += 1;
+                    }
+                    return self.continue_batch();
+                }
+
                 self.status = message;
                 vec![
                     Action::list(source_panel, &self.panel(source_panel).location),
@@ -361,9 +464,15 @@ impl App {
                 self.busy = false;
                 self.progress = None;
                 self.close_progress_dialog();
-                self.dialog = Some(Dialog::ConfirmOverwrite {
-                    request,
+                let in_batch = self.batch.is_some();
+                self.dialog = Some(Dialog::Confirm {
+                    title: "Overwrite?".to_string(),
                     message,
+                    yes_label: "Overwrite".to_string(),
+                    no_label: if in_batch { "Skip" } else { "Cancel" }.to_string(),
+                    action: ConfirmAction::OverwriteOne {
+                        request: Box::new(request),
+                    },
                     yes: false,
                 });
                 Vec::new()
@@ -372,8 +481,29 @@ impl App {
                 self.busy = false;
                 self.progress = None;
                 self.close_progress_dialog();
-                self.status = "Cancelled".to_string();
-                Vec::new()
+                match self.batch.take() {
+                    Some(batch) if batch.total > 1 => {
+                        self.status = format!(
+                            "Cancelled after {} of {} files",
+                            batch.completed, batch.total
+                        );
+                        vec![
+                            Action::list(
+                                batch.source_panel,
+                                &self.panel(batch.source_panel).location,
+                            ),
+                            Action::list(
+                                batch.destination_panel,
+                                &self.panel(batch.destination_panel).location,
+                            ),
+                            Action::RefreshStorages,
+                        ]
+                    }
+                    _ => {
+                        self.status = "Cancelled".to_string();
+                        Vec::new()
+                    }
+                }
             }
             Event::DirCreated { panel, message } => {
                 self.busy = false;
@@ -437,6 +567,14 @@ impl App {
         match key.code {
             KeyCode::Char('q') if !ctrl => {
                 self.should_quit = true;
+                Vec::new()
+            }
+            KeyCode::Char(' ') => {
+                self.toggle_mark_under_cursor();
+                Vec::new()
+            }
+            KeyCode::Char('a') if ctrl => {
+                self.toggle_mark_all();
                 Vec::new()
             }
             KeyCode::Char('c') if ctrl => self.copy_selected(),
@@ -539,6 +677,7 @@ impl App {
         target.selected = previous
             .and_then(|name| target.entries.iter().position(|entry| entry.name == name))
             .unwrap_or(0);
+        target.prune_marks();
     }
 
     fn update_storages(&mut self, storages: Vec<StorageEntry>) {
@@ -597,6 +736,7 @@ impl App {
             target.selected = 0;
             target.loading = true;
             target.error = None;
+            target.marked.clear();
         }
         vec![Action::list(panel, &location)]
     }
@@ -621,39 +761,90 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
+    // Marking files
+    // -----------------------------------------------------------------------
+
+    /// Mark or unmark the file under the cursor (Space).
+    ///
+    /// Marking advances the cursor, so a run of files can be marked with `Space Space Space`.
+    fn toggle_mark_under_cursor(&mut self) {
+        let panel = self.active;
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
+        if entry.is_parent() {
+            self.status = "The parent entry cannot be marked".to_string();
+            return;
+        }
+        if entry.is_dir() {
+            self.status = "Folders cannot be copied yet, so they cannot be marked".to_string();
+            return;
+        }
+
+        let marked_now = {
+            let panel = self.panel_mut(panel);
+            if panel.marked.remove(&entry.name) {
+                false
+            } else {
+                panel.marked.insert(entry.name.clone());
+                true
+            }
+        };
+        let count = self.panel(panel).marked_count();
+        self.status = if count == 0 {
+            "No marks".to_string()
+        } else {
+            format!("{count} marked — Ctrl-C copies them")
+        };
+        if marked_now {
+            self.panel_mut(panel).select_next();
+        }
+    }
+
+    /// Mark every file in the panel, or clear all marks when everything is already marked.
+    fn toggle_mark_all(&mut self) {
+        let panel = self.active;
+        let files: Vec<String> = self
+            .panel(panel)
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_parent() && !entry.is_dir())
+            .map(|entry| entry.name.clone())
+            .collect();
+
+        if files.is_empty() {
+            self.status = "There are no files to mark".to_string();
+            return;
+        }
+
+        let all_marked = files.iter().all(|name| self.panel(panel).is_marked(name));
+        if all_marked {
+            self.panel_mut(panel).marked.clear();
+            self.status = "Marks cleared".to_string();
+        } else {
+            let target = self.panel_mut(panel);
+            target.marked.extend(files);
+            let count = target.marked_count();
+            self.status = format!("{count} marked — Ctrl-C copies them");
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Copy
     // -----------------------------------------------------------------------
 
+    /// Copy the marked files, or the file under the cursor, to the other panel.
     fn copy_selected(&mut self) -> Vec<Action> {
         if self.busy {
             self.status = "Wait for the running operation to finish".to_string();
             return Vec::new();
         }
-        let Some(entry) = self.selected_entry().cloned() else {
-            self.status = "Nothing to copy".to_string();
-            return Vec::new();
-        };
-        if entry.is_parent() || entry.is_dir() {
-            self.status = "Only files can be copied (recursion is not supported yet)".to_string();
-            return Vec::new();
-        }
+
         let source_panel = self.active;
         let destination_panel = source_panel.other();
         let source_location = self.panel(source_panel).location.clone();
-
-        let source = match &entry.origin {
-            Origin::Local(path) => Location::Local(path.clone()),
-            Origin::Remote => match source_location.child(&entry.name) {
-                Some(location) => location,
-                None => {
-                    self.status = format!("Cannot resolve `{}`", entry.name);
-                    return Vec::new();
-                }
-            },
-            Origin::Parent => return Vec::new(),
-        };
-
         let destination = self.panel(destination_panel).location.clone();
+
         if !destination.is_writable() {
             self.show_error(
                 "Destination is read-only",
@@ -662,44 +853,200 @@ impl App {
             );
             return Vec::new();
         }
-        if source.parent().as_ref() == Some(&destination) {
+        if source_location.same_target(&destination) {
             self.status = "Source and destination are the same folder".to_string();
             return Vec::new();
         }
 
-        let request = CopyRequest {
+        let entries: Vec<FileEntry> = if self.panel(source_panel).marked.is_empty() {
+            match self.selected_entry() {
+                Some(entry) if entry.is_parent() => {
+                    self.status = "Nothing to copy".to_string();
+                    return Vec::new();
+                }
+                Some(entry) if entry.is_dir() => {
+                    self.status =
+                        "Only files can be copied (recursion is not supported yet)".to_string();
+                    return Vec::new();
+                }
+                Some(entry) => vec![entry.clone()],
+                None => {
+                    self.status = "Nothing to copy".to_string();
+                    return Vec::new();
+                }
+            }
+        } else {
+            let panel = self.panel(source_panel);
+            panel
+                .entries
+                .iter()
+                .filter(|entry| panel.is_marked(&entry.name) && !entry.is_dir())
+                .cloned()
+                .collect()
+        };
+
+        let requests: Vec<CopyRequest> = entries
+            .iter()
+            .filter_map(|entry| self.copy_request(source_panel, destination_panel, entry))
+            .collect();
+
+        if requests.is_empty() {
+            self.status = "Nothing to copy".to_string();
+            return Vec::new();
+        }
+
+        let conflicts = self.count_destination_conflicts(destination_panel, &requests);
+        if conflicts > 0 {
+            let (message, yes_label) = if requests.len() == 1 {
+                (
+                    format!(
+                        "`{}` already exists in the target folder.\n\nOverwrite it?",
+                        requests[0].source_name
+                    ),
+                    "Overwrite",
+                )
+            } else {
+                (
+                    format!(
+                        "{conflicts} of {} files already exist in the target folder.\n\nOverwrite them?",
+                        requests.len()
+                    ),
+                    "Overwrite all",
+                )
+            };
+            self.dialog = Some(Dialog::Confirm {
+                title: "Overwrite?".to_string(),
+                message,
+                yes_label: yes_label.to_string(),
+                no_label: "Cancel".to_string(),
+                action: ConfirmAction::CopyAll { requests },
+                yes: false,
+            });
+            return Vec::new();
+        }
+
+        if requests.len() == 1 {
+            let request = requests.into_iter().next().expect("checked length");
+            self.busy = true;
+            self.progress = None;
+            self.status = format!("Copying {}…", request.source_name);
+            vec![Action::Copy(request)]
+        } else {
+            self.begin_batch(requests)
+        }
+    }
+
+    /// Build a copy job for one panel entry.
+    fn copy_request(
+        &self,
+        source_panel: PanelId,
+        destination_panel: PanelId,
+        entry: &FileEntry,
+    ) -> Option<CopyRequest> {
+        let source = match &entry.origin {
+            Origin::Local(path) => Location::Local(path.clone()),
+            Origin::Remote => self.panel(source_panel).location.child(&entry.name)?,
+            Origin::Parent => return None,
+        };
+        Some(CopyRequest {
             source_panel,
             source,
             source_name: entry.name.clone(),
             destination_panel,
-            destination,
+            destination: self.panel(destination_panel).location.clone(),
             overwrite: false,
-        };
+        })
+    }
 
-        let conflict = self
+    /// How many of the jobs would land on an existing destination entry.
+    fn count_destination_conflicts(
+        &self,
+        destination_panel: PanelId,
+        requests: &[CopyRequest],
+    ) -> usize {
+        let existing: BTreeSet<String> = self
             .panel(destination_panel)
             .entries
             .iter()
-            .find(|candidate| {
-                !candidate.is_parent() && candidate.name.eq_ignore_ascii_case(&entry.name)
-            })
-            .is_some();
+            .filter(|entry| !entry.is_parent())
+            .map(|entry| entry.name.to_lowercase())
+            .collect();
+        requests
+            .iter()
+            .filter(|request| existing.contains(&request.source_name.to_lowercase()))
+            .count()
+    }
 
-        if conflict {
-            self.dialog = Some(Dialog::ConfirmOverwrite {
-                message: format!(
-                    "`{}` already exists in the target folder.\n\nOverwrite it?",
-                    entry.name
-                ),
-                request,
-                yes: false,
-            });
-            Vec::new()
+    /// Start a multi-file copy; the first file is sent immediately.
+    fn begin_batch(&mut self, requests: Vec<CopyRequest>) -> Vec<Action> {
+        let Some(first) = requests.first() else {
+            return Vec::new();
+        };
+        let (source_panel, destination_panel) = (first.source_panel, first.destination_panel);
+        self.batch = Some(BatchCopy {
+            total: requests.len(),
+            queue: requests.into(),
+            completed: 0,
+            skipped: 0,
+            source_panel,
+            destination_panel,
+        });
+        self.continue_batch()
+    }
+
+    /// Send the next batch file, or finish the batch when the queue is empty.
+    fn continue_batch(&mut self) -> Vec<Action> {
+        let next = self.batch.as_mut().and_then(|batch| {
+            batch.queue.pop_front().map(|request| {
+                let position = batch.completed + batch.skipped + 1;
+                (request, position, batch.total)
+            })
+        });
+
+        let Some((request, position, total)) = next else {
+            return self.finish_batch();
+        };
+
+        self.busy = true;
+        self.progress = None;
+        self.status = if total > 1 {
+            format!("Copying {position}/{total}: {}…", request.source_name)
         } else {
-            self.busy = true;
-            self.status = format!("Copying {}…", entry.name);
-            vec![Action::Copy(request)]
-        }
+            format!("Copying {}…", request.source_name)
+        };
+        vec![Action::Copy(request)]
+    }
+
+    /// End the batch, summarise the result and refresh both panels.
+    fn finish_batch(&mut self) -> Vec<Action> {
+        let Some(batch) = self.batch.take() else {
+            return Vec::new();
+        };
+        self.busy = false;
+        self.progress = None;
+        self.close_progress_dialog();
+
+        self.status = if batch.skipped == 0 {
+            format!(
+                "Copied {} file{}",
+                batch.completed,
+                if batch.completed == 1 { "" } else { "s" }
+            )
+        } else {
+            format!(
+                "Copied {} of {} files ({} skipped)",
+                batch.completed, batch.total, batch.skipped
+            )
+        };
+
+        vec![
+            Action::list(batch.source_panel, &self.panel(batch.source_panel).location),
+            Action::list(
+                batch.destination_panel,
+                &self.panel(batch.destination_panel).location,
+            ),
+            Action::RefreshStorages,
+        ]
     }
 
     fn open_mkdir_dialog(&mut self) {
@@ -779,38 +1126,41 @@ impl App {
                 }
                 _ => Vec::new(),
             },
-            Dialog::ConfirmOverwrite {
-                mut request,
+            Dialog::Confirm {
+                title,
                 message,
+                yes_label,
+                no_label,
+                action,
                 mut yes,
             } => match key.code {
                 KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
                     yes = !yes;
-                    self.dialog = Some(Dialog::ConfirmOverwrite {
-                        request,
+                    self.dialog = Some(Dialog::Confirm {
+                        title,
                         message,
+                        yes_label,
+                        no_label,
+                        action,
                         yes,
                     });
                     Vec::new()
                 }
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.dialog = None;
-                    request.overwrite = true;
-                    self.busy = true;
-                    self.status = format!("Copying {}…", request.source_name);
-                    vec![Action::Copy(request)]
+                    self.confirm(action)
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.dialog = None;
+                    self.decline(action)
                 }
                 KeyCode::Enter if yes => {
                     self.dialog = None;
-                    request.overwrite = true;
-                    self.busy = true;
-                    self.status = format!("Copying {}…", request.source_name);
-                    vec![Action::Copy(request)]
+                    self.confirm(action)
                 }
-                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                KeyCode::Enter => {
                     self.dialog = None;
-                    self.status = "Copy cancelled".to_string();
-                    Vec::new()
+                    self.decline(action)
                 }
                 _ => Vec::new(),
             },
@@ -914,6 +1264,67 @@ impl App {
                 }
                 _ => Vec::new(),
             },
+        }
+    }
+
+    /// Execute the confirming branch of a [`Dialog::Confirm`].
+    fn confirm(&mut self, action: ConfirmAction) -> Vec<Action> {
+        match action {
+            ConfirmAction::CopyAll { mut requests } => {
+                for request in &mut requests {
+                    request.overwrite = true;
+                }
+                if requests.len() == 1 {
+                    let request = requests.into_iter().next().expect("checked length");
+                    self.busy = true;
+                    self.progress = None;
+                    self.status = format!("Copying {}…", request.source_name);
+                    vec![Action::Copy(request)]
+                } else {
+                    self.begin_batch(requests)
+                }
+            }
+            ConfirmAction::OverwriteOne { mut request } => {
+                request.overwrite = true;
+                let label = self.batch.as_ref().map_or_else(
+                    || format!("Copying {}…", request.source_name),
+                    |batch| {
+                        format!(
+                            "Copying {}/{}: {}…",
+                            batch.completed + batch.skipped + 1,
+                            batch.total,
+                            request.source_name
+                        )
+                    },
+                );
+                self.busy = true;
+                self.progress = None;
+                self.status = label;
+                vec![Action::Copy(*request)]
+            }
+        }
+    }
+
+    /// Execute the declining branch of a [`Dialog::Confirm`].
+    fn decline(&mut self, action: ConfirmAction) -> Vec<Action> {
+        match action {
+            ConfirmAction::CopyAll { .. } => {
+                self.batch = None;
+                self.busy = false;
+                self.status = "Copy cancelled".to_string();
+                Vec::new()
+            }
+            ConfirmAction::OverwriteOne { request } => {
+                self.busy = false;
+                self.progress = None;
+                self.status = format!("Skipped {}", request.source_name);
+                if let Some(batch) = &mut self.batch {
+                    batch.skipped += 1;
+                    return self.continue_batch();
+                }
+                self.status = "Copy cancelled".to_string();
+                Vec::new()
+            }
         }
     }
 
@@ -1238,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn f5_asks_before_overwriting_and_retries_with_overwrite() {
+    fn copy_asks_before_overwriting_and_retries_with_overwrite() {
         let mut fixture = fixture();
         let app = &mut fixture.app;
         app.active = PanelId::Left;
@@ -1250,7 +1661,7 @@ mod tests {
         assert!(actions.is_empty(), "nothing may happen before confirmation");
         assert!(matches!(
             app.dialog,
-            Some(Dialog::ConfirmOverwrite { yes: false, .. })
+            Some(Dialog::Confirm { yes: false, .. })
         ));
         assert!(!app.busy);
 
@@ -1270,18 +1681,312 @@ mod tests {
     }
 
     #[test]
-    fn f5_refuses_folders_and_parent_rows() {
+    fn copy_refuses_folders_and_parent_rows() {
         let mut fixture = fixture();
         let app = &mut fixture.app;
         app.active = PanelId::Left;
         app.panels[0].selected = 0; // ".."
         assert!(app.on_key(ctrl('c')).is_empty());
-        assert!(app.status.contains("Only files"));
+        assert_eq!(app.status, "Nothing to copy");
 
         select_by_name(app, PanelId::Left, "Sub");
         app.status.clear();
         assert!(app.on_key(ctrl('c')).is_empty());
         assert!(app.status.contains("Only files"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Marking and batch copies
+    // -----------------------------------------------------------------------
+
+    fn marked_names(app: &App, panel: PanelId) -> Vec<String> {
+        app.panel(panel).marked.iter().cloned().collect()
+    }
+
+    #[test]
+    fn space_marks_a_file_and_advances_the_cursor() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        select_by_name(app, PanelId::Left, "book.epub");
+
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(app.panel(PanelId::Left).is_marked("book.epub"));
+        assert_eq!(app.panel(PanelId::Left).marked_count(), 1);
+        assert_eq!(
+            app.selected_entry().unwrap().name,
+            "notes.txt",
+            "marking should move to the next row"
+        );
+        assert!(app.status.contains("1 marked"));
+
+        // Mark the second file too, then go back and unmark the first one.
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(app.panel(PanelId::Left).is_marked("notes.txt"));
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(!app.panel(PanelId::Left).is_marked("book.epub"));
+        assert_eq!(marked_names(app, PanelId::Left), vec!["notes.txt"]);
+    }
+
+    #[test]
+    fn space_refuses_folders_and_the_parent_row() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+
+        app.panels[0].selected = 0; // ".."
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(app.status.contains("parent entry"));
+        assert_eq!(app.panel(PanelId::Left).marked_count(), 0);
+
+        select_by_name(app, PanelId::Left, "Sub");
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(app.status.contains("Folders"));
+        assert_eq!(app.panel(PanelId::Left).marked_count(), 0);
+    }
+
+    #[test]
+    fn ctrl_a_marks_all_files_and_toggles_them_off_again() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+
+        app.on_key(ctrl('a'));
+        assert_eq!(
+            marked_names(app, PanelId::Left),
+            vec!["book.epub".to_string(), "notes.txt".to_string()],
+            "directories and `..` are not marked"
+        );
+
+        app.on_key(ctrl('a'));
+        assert_eq!(app.panel(PanelId::Left).marked_count(), 0);
+        assert_eq!(app.status, "Marks cleared");
+    }
+
+    #[test]
+    fn ctrl_c_copies_all_marked_files_one_after_another() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        app.on_key(ctrl('a'));
+
+        let actions = app.on_key(ctrl('c'));
+        let [Action::Copy(first)] = actions.as_slice() else {
+            panic!("expected the first copy, got {actions:?}");
+        };
+        assert_eq!(first.source_name, "book.epub");
+        assert!(app.busy);
+        assert!(app.status.contains("1/2"));
+
+        // First file done: the second one is sent automatically.
+        let actions = app.apply(Event::CopyFinished {
+            source_panel: PanelId::Left,
+            destination_panel: PanelId::Right,
+            message: "Uploaded book.epub".to_string(),
+        });
+        let [Action::Copy(second)] = actions.as_slice() else {
+            panic!("expected the second copy, got {actions:?}");
+        };
+        assert_eq!(second.source_name, "notes.txt");
+        assert!(app.status.contains("2/2"));
+
+        // Last file done: summary plus two reloads and a storage refresh.
+        let actions = app.apply(Event::CopyFinished {
+            source_panel: PanelId::Left,
+            destination_panel: PanelId::Right,
+            message: "Uploaded notes.txt".to_string(),
+        });
+        assert_eq!(actions.len(), 3);
+        assert!(!app.busy);
+        assert_eq!(app.status, "Copied 2 files");
+    }
+
+    #[test]
+    fn a_batch_asks_once_before_overwriting_existing_files() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        app.panels[1].entries = vec![
+            remote_entry("book.epub", EntryKind::File),
+            remote_entry("notes.txt", EntryKind::File),
+        ];
+        app.on_key(ctrl('a'));
+
+        let actions = app.on_key(ctrl('c'));
+        assert!(actions.is_empty(), "nothing may happen before confirmation");
+        match &app.dialog {
+            Some(Dialog::Confirm {
+                action: ConfirmAction::CopyAll { requests },
+                yes_label,
+                no_label,
+                yes,
+                ..
+            }) => {
+                assert_eq!(requests.len(), 2);
+                assert!(requests.iter().all(|request| !request.overwrite));
+                assert_eq!(yes_label, "Overwrite all");
+                assert_eq!(no_label, "Cancel");
+                assert!(!yes);
+            }
+            other => panic!("expected a batch confirmation, got {other:?}"),
+        }
+
+        let actions = app.on_key(key(KeyCode::Char('y')));
+        let [Action::Copy(first)] = actions.as_slice() else {
+            panic!("expected the first overwrite copy");
+        };
+        assert!(first.overwrite);
+        assert!(app.busy);
+    }
+
+    #[test]
+    fn a_mid_batch_conflict_can_be_skipped() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        app.on_key(ctrl('a'));
+
+        let actions = app.on_key(ctrl('c'));
+        let [Action::Copy(first)] = actions.as_slice() else {
+            panic!("expected a copy action");
+        };
+        let first = first.clone();
+
+        // The worker notices a race and reports a conflict.
+        app.apply(Event::Conflict {
+            request: first,
+            message: "`book.epub` already exists".to_string(),
+        });
+        assert!(matches!(
+            &app.dialog,
+            Some(Dialog::Confirm { no_label, .. }) if no_label == "Skip"
+        ));
+
+        let actions = app.on_key(key(KeyCode::Char('n')));
+        let [Action::Copy(second)] = actions.as_slice() else {
+            panic!("expected the next file after skipping");
+        };
+        assert_eq!(second.source_name, "notes.txt");
+        assert!(app.status.contains("2/2"), "the batch keeps going");
+
+        let actions = app.apply(Event::CopyFinished {
+            source_panel: PanelId::Left,
+            destination_panel: PanelId::Right,
+            message: "Uploaded notes.txt".to_string(),
+        });
+        assert_eq!(actions.len(), 3);
+        assert_eq!(app.status, "Copied 1 of 2 files (1 skipped)");
+    }
+
+    #[test]
+    fn a_mid_batch_conflict_can_be_overwritten() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        app.on_key(ctrl('a'));
+
+        let actions = app.on_key(ctrl('c'));
+        let [Action::Copy(first)] = actions.as_slice() else {
+            panic!("expected a copy action");
+        };
+        let first = first.clone();
+        app.apply(Event::Conflict {
+            request: first,
+            message: "`book.epub` already exists".to_string(),
+        });
+
+        let actions = app.on_key(key(KeyCode::Char('y')));
+        let [Action::Copy(retry)] = actions.as_slice() else {
+            panic!("expected the same file to be retried");
+        };
+        assert!(retry.overwrite);
+        assert_eq!(retry.source_name, "book.epub");
+    }
+
+    #[test]
+    fn a_failing_batch_stops_and_reports_progress() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        app.on_key(ctrl('a'));
+        let _ = app.on_key(ctrl('c'));
+
+        let actions = app.apply(Event::Failure {
+            panel: Some(PanelId::Right),
+            message: "device unplugged".to_string(),
+            hint: None,
+        });
+        assert_eq!(
+            actions.len(),
+            3,
+            "panels are refreshed after an aborted batch"
+        );
+        assert!(!app.busy);
+        assert_eq!(app.status, "Copy aborted after 0 of 2 files");
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Message { is_error: true, .. })
+        ));
+    }
+
+    #[test]
+    fn cancelling_a_batch_reports_progress_and_reloads() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        app.on_key(ctrl('a'));
+        let _ = app.on_key(ctrl('c'));
+
+        let actions = app.apply(Event::Cancelled);
+        assert_eq!(actions.len(), 3, "both panels plus the storage refresh");
+        assert!(!app.busy);
+        assert_eq!(app.status, "Cancelled after 0 of 2 files");
+    }
+
+    #[test]
+    fn marks_are_cleared_on_navigation_and_pruned_on_reload() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        select_by_name(app, PanelId::Left, "book.epub");
+        app.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.panel(PanelId::Left).marked_count(), 1);
+
+        // Navigating into a folder starts with a blank multi-selection.
+        select_by_name(app, PanelId::Left, "Sub");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.panel(PanelId::Left).marked_count(), 0);
+
+        // A reload drops marks for files that disappeared.
+        app.panels[0].entries = vec![
+            FileEntry::parent(),
+            FileEntry {
+                name: "book.epub".to_string(),
+                kind: EntryKind::File,
+                size: Some(1),
+                modified: None,
+                origin: Origin::Remote,
+            },
+        ];
+        app.panels[0].marked.insert("book.epub".to_string());
+        app.panels[0].marked.insert("gone.epub".to_string());
+        let location = app.panel(PanelId::Left).location.clone();
+        app.apply(Event::Listed {
+            panel: PanelId::Left,
+            location,
+            entries: vec![
+                FileEntry::parent(),
+                FileEntry {
+                    name: "book.epub".to_string(),
+                    kind: EntryKind::File,
+                    size: Some(1),
+                    modified: None,
+                    origin: Origin::Remote,
+                },
+            ],
+        });
+        assert_eq!(marked_names(app, PanelId::Left), vec!["book.epub"]);
     }
 
     #[test]

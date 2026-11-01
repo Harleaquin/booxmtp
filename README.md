@@ -167,23 +167,23 @@ Eine echte Aufnahme (100 % Terminal, keine Mockups):
 
 ```text
  ONYX KHAJE-IDP _SN:72E08D03 · serial 6DE76AE3 · 480 Mbit/s (USB 2.0) internal: 40.8 GiB free  ·  sd: 39.8 GiB free
-┌ Local: ~/Code/BooxMTP ───────────────────────────────────┐┌ sd:/Books ───────────────────────────────────────────────┐
-│..                                                        ││..                                                        │
-│.git/                                                     ││One Piece (Digital) (1r0n)/                               │
-│.github/                                                  ││Accursed Race, An - Elizabeth Gaskell.epub       149.6 KiB│
-│scripts/                                                  ││Algebraist, Der - Iain Banks.mobi                962.8 KiB│
-│src/                                                      ││American Gods_ Roman (German Edition) - Neil Gai 665.6 KiB│
-│target/                                                   ││Atta Troll_ Erweiterte Ausgabe (German Edition)  159.9 KiB│
-│tests/                                                    ││Bedenke Phlebas - Iain Banks.mobi                810.2 KiB│
-│.gitignore                                       28 B     ││besten Erzahlungen des H.P. Lovecraft_ Berge des 988.6 KiB│
-│Cargo.lock                                       63.2 KiB ││Blicke windwaerts - Iain Banks.mobi              636.8 KiB│
-│Cargo.toml                                       688 B    ││Caesar's Messiah_ The Roman Conspiracy to Invent 1.5 MiB  │
-│PLAN.md                                          14.9 KiB ││Call of Cthulhu_ 67 Tales of Horror by H.P. Love 1.8 MiB  │
-│README.md                                        22.0 KiB ││Can Such Things Be_ - Ambrose Bierce.epub        255.8 KiB│
+┌ Local: ~/Code/BooxMTP ───────────────────────────────────┐┌ sd:/Books ─────────────────────────────────── [2 marked] ┐
+│  ..                                                      ││  ..                                                      │
+│  .git/                                                   ││  One Piece (Digital) (1r0n)/                             │
+│  .github/                                                ││✓ Accursed Race, An - Elizabeth Gaskell.epub     149.6 KiB│
+│  scripts/                                                ││✓ Algebraist, Der - Iain Banks.mobi              962.8 KiB│
+│  src/                                                    ││  American Gods_ Roman (German Edition) - Neil G 665.6 KiB│
+│  target/                                                 ││  Atta Troll_ Erweiterte Ausgabe (German Edition 159.9 KiB│
+│  tests/                                                  ││  Bedenke Phlebas - Iain Banks.mobi              810.2 KiB│
+│  .gitignore                                     28 B     ││  besten Erzahlungen des H.P. Lovecraft_ Berge d 988.6 KiB│
+│  Cargo.lock                                     63.2 KiB ││  Blicke windwaerts - Iain Banks.mobi            636.8 KiB│
+│  Cargo.toml                                     688 B    ││  Caesar's Messiah_ The Roman Conspiracy to Inve 1.5 MiB  │
+│  PLAN.md                                        14.9 KiB ││  Call of Cthulhu_ 67 Tales of Horror by H.P. Lo 1.8 MiB  │
+│  README.md                                      22.0 KiB ││  Can Such Things Be_ - Ambrose Bierce.epub      255.8 KiB│
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
- ..                                                                                                                     
- Connected                                                                                                              
-Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit  Ctrl-R Reload  Ctrl-S Storage  Ctrl-U Swap  ? Help
+ American Gods_ Roman (German Edition) - Neil Gaiman.epub   665.6 KiB   2024-12-13 19:56:10   [39.8 GiB free]
+ 2 marked — Ctrl-C copies them
+Space Mark  Ctrl-A All  Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit  Ctrl-R Reload  Ctrl-S Storage  ? Help
 ```
 
 ### Tasten
@@ -197,7 +197,9 @@ Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit  Ctrl-R Reload  Ctrl-S Storage  Ctrl-U Swap
 | `Ctrl-U` | Panels tauschen (Positionen inklusive) |
 | `Ctrl-R` | beide Panels und die Speicher-Metadaten neu laden |
 | `Ctrl-S` | Speicher des aktiven Remote-Panels wählen |
-| `Ctrl-C` | markierte Datei ins andere Panel kopieren |
+| `Space` | Datei markieren/entmarkieren, Cursor rückt weiter |
+| `Ctrl-A` | alle Dateien des Ordners markieren (nochmal: alle Markierungen aufheben) |
+| `Ctrl-C` | markierte Dateien kopieren, sonst die Datei unter dem Cursor |
 | `Ctrl-N` | Ordner anlegen (Name eintippen, `Enter`, `Esc` bricht ab) |
 | `?` | Hilfe |
 | `Ctrl-Q`, `Esc`, `q` | beenden |
@@ -213,9 +215,17 @@ Abbruch (im Transfer-Dialog bricht `Esc` ab). Einzige Ausnahme ohne `Ctrl` ist `
   ist lokal, das rechte zeigt den Reader (Speicher per `Ctrl-S` wechselbar). Reader → Reader ist
   noch nicht unterstützt (MTP kann nicht streamend zwischen zwei Objekten kopieren) und wird mit
   Hinweis abgelehnt.
-* **Kopieren** (`Ctrl-C`) nutzt denselben Streaming-Kern wie `pull`/`push`. Existiert das Ziel
-  bereits, fragt die TUI nach; `y`/`Enter` bestätigt, `n`/`Esc` bricht ab. Ein laufender Transfer
-  zeigt einen Fortschrittsdialog, `Esc` bricht ihn ab (kooperativ, ohne das Gerät zu blockieren).
+* **Mehrfachauswahl:** `Space` markiert eine Datei (Haken `✓` links, Zähler rechts im Panel-Titel)
+  und rückt den Cursor weiter, `Ctrl-A` markiert alle Dateien des Ordners. Markierungen gelten pro
+  Ordner: beim Wechsel in einen anderen Ordner werden sie geleert, bei `Ctrl-R` bleiben sie für
+  noch vorhandene Dateien erhalten. Ordner lassen sich nicht markieren (keine Rekursion).
+* **Kopieren** (`Ctrl-C`) nutzt denselben Streaming-Kern wie `pull`/`push` und arbeitet die
+  markierten Dateien nacheinander ab (Fortschritt „2/5“, Statuszeile zeigt den Dateinamen). Die
+  Kollisionsprüfung passiert einmal vorab: Existieren Zieldateien, fragt die TUI „Overwrite all“
+  bzw. bei einem einzelnen Lauf „Overwrite“. Taucht während des Laufs doch ein Konflikt auf (z. B.
+  durch ein anderes Programm), fragt sie pro Datei mit „Overwrite“/„Skip“. Am Ende steht eine
+  Zusammenfassung („Copied 3 of 5 files (2 skipped)“). Ein laufender Transfer zeigt einen
+  Fortschrittsdialog, `Esc` bricht die restlichen Dateien ab.
 * **Kein Löschen, kein Umbenennen, keine Rekursion** – wie im CLI-MVP. Ordner werden im Panel
   angezeigt, aber `Ctrl-C` kopiert nur Dateien.
 * **Nichts blockiert die Oberfläche:** Geräte-I/O läuft in einem eigenen Thread mit eigener
