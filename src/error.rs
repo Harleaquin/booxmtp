@@ -90,6 +90,13 @@ pub enum Error {
     #[error("the device reports no storage")]
     NoStorage,
 
+    /// The background I/O worker of the TUI stopped unexpectedly.
+    #[error("background I/O worker failed: {message}")]
+    Worker {
+        /// What went wrong.
+        message: String,
+    },
+
     /// The device does not advertise an MTP operation the program needs.
     #[error("this device does not support {operation}")]
     Unsupported {
@@ -425,6 +432,10 @@ impl Error {
                 }
             }),
             Error::Mtp { source, .. } => mtp_hint(source),
+            Error::Worker { .. } => Some(
+                "this is a bug; run with `-v` and include the last log lines in a report."
+                    .to_string(),
+            ),
             Error::Io { .. } => None,
         }
     }
@@ -460,6 +471,7 @@ impl Error {
                 exit_code::TRANSFER
             }
             Error::Io { .. } => exit_code::LOCAL_IO,
+            Error::Worker { .. } => exit_code::FAILURE,
         }
     }
 }

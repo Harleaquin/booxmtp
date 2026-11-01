@@ -48,6 +48,7 @@ pub mod remote_path;
 pub mod session;
 pub mod storage;
 pub mod transfer;
+pub mod tui;
 
 pub use error::{Error, Result};
 pub use remote_path::{DirListing, EntryKind, RemoteEntry, RemotePath};

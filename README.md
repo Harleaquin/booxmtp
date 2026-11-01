@@ -31,9 +31,11 @@ Der MVP aus `PLAN.md` ist umgesetzt und auf echter Hardware verifiziert:
 * Streaming in beide Richtungen (kein vollständiges Einlesen in den RAM)
 * Push/Pull-Roundtrip bytegleich (SHA-256 auf BOOX Go Color 7, macOS, Apple Silicon)
 * Fehlerfälle: fehlender Pfad, Kollision, fehlende SD-Karte, ungültige Storage-ID, Abbruch
+* **TUI im Midnight-Commander-Stil** (`booxmtp tui`): zwei Panels (lokal ↔ Reader), Navigation,
+  Kopieren mit Fortschritt/Abbrechen, Ordner anlegen, Storage-Wechsel, Hilfebildschirm
 
-Noch nicht enthalten (bewusst, siehe „Nicht-Ziele“): Rekursion, `rm`/`mv`, Synchronisation,
-`--json`, Fortschrittsbalken im Vollbild.
+Noch nicht enthalten (bewusst, siehe „Nicht-Ziele“): rekursive Transfers, `rm`/`mv`, Synchronisation,
+`--json`, GUI.
 
 ## Voraussetzungen
 
@@ -83,6 +85,7 @@ booxmtp [--device <SERIAL>] [-v] [--no-progress] <COMMAND>
   push     -s <STORAGE> <LOKAL> <REMOTE>
                                    Datei hochladen
   mkdir    -s <STORAGE> <REMOTE>   Ordner anlegen
+  tui      [-s <STORAGE>]          Interaktiver Zwei-Panel-Dateimanager
 ```
 
 Globale Optionen:
@@ -104,6 +107,8 @@ booxmtp pull --storage internal "/Books/Beispiel.epub" ./Beispiel.epub
 booxmtp push --storage sd ./Roman.epub /Books/            # Zielordner: Name wird angehängt
 booxmtp push --storage 65537 ./Notizen.pdf /Documents/Notizen.pdf
 booxmtp mkdir --storage sd /Books/ToRead
+booxmtp tui                       # Dateimanager: links lokal, rechts internal
+booxmtp tui --storage sd          # rechte Seite startet auf der SD-Karte
 ```
 
 ### Storage-Auswahl
@@ -152,6 +157,70 @@ Remote-Pfade sind **MTP-Objektpfade relativ zum Storage-Root**, keine POSIX-Pfad
 * `stdout` bleibt maschinenlesbar (Tabellen für `devices`, `storages`, `ls`), Statusmeldungen,
   Fortschritt und Warnungen gehen nach `stderr`.
 
+## Interaktive TUI (Midnight-Commander-Stil)
+
+```text
+booxmtp tui [--device <SERIAL>] [-s <STORAGE>]
+```
+
+Eine echte Aufnahme (100 % Terminal, keine Mockups):
+
+```text
+ ONYX KHAJE-IDP _SN:72E08D03 · serial 6DE76AE3 · 480 Mbit/s (USB 2.0) internal: 40.8 GiB free  ·  sd: 39.8 GiB free
+┌ Local: ~/Code/BooxMTP ───────────────────────────────────┐┌ sd:/Books ───────────────────────────────────────────────┐
+│..                                                        ││..                                                        │
+│.git/                                                     ││One Piece (Digital) (1r0n)/                               │
+│.github/                                                  ││Accursed Race, An - Elizabeth Gaskell.epub       149.6 KiB│
+│scripts/                                                  ││Algebraist, Der - Iain Banks.mobi                962.8 KiB│
+│src/                                                      ││American Gods_ Roman (German Edition) - Neil Gai 665.6 KiB│
+│target/                                                   ││Atta Troll_ Erweiterte Ausgabe (German Edition)  159.9 KiB│
+│tests/                                                    ││Bedenke Phlebas - Iain Banks.mobi                810.2 KiB│
+│.gitignore                                       8 B      ││besten Erzahlungen des H.P. Lovecraft_ Berge des 988.6 KiB│
+│Cargo.lock                                       63.3 KiB ││Blicke windwaerts - Iain Banks.mobi              636.8 KiB│
+│Cargo.toml                                       707 B    ││Caesar's Messiah_ The Roman Conspiracy to Invent 1.5 MiB  │
+│PLAN.md                                          14.9 KiB ││Call of Cthulhu_ 67 Tales of Horror by H.P. Love 1.8 MiB  │
+│README.md                                        12.9 KiB ││Can Such Things Be_ - Ambrose Bierce.epub        255.8 KiB│
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+ ..                                                                                                                     
+ Connected                                                                                                              
+F1 Help  F5 Copy  F7 MkDir  F10 Quit  Tab Switch  Ctrl-U Swap  Ctrl-R Reload  Ctrl-S Storage
+```
+
+### Tasten
+
+| Taste | Wirkung |
+|---|---|
+| `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` | Cursor bewegen |
+| `Enter`, `→` | Ordner öffnen |
+| `Backspace`, `←` | eine Ebene nach oben |
+| `Tab` | aktives Panel wechseln |
+| `Ctrl-U` | Panels tauschen (Positionen inklusive) |
+| `Ctrl-R` | beide Panels und die Speicher-Metadaten neu laden |
+| `Ctrl-S` | Speicher des aktiven Remote-Panels wählen |
+| `F5` | markierte Datei ins andere Panel kopieren |
+| `F7` | Ordner anlegen (Name eintippen, `Enter`, `Esc` bricht ab) |
+| `F1` | Hilfe |
+| `F10`, `Esc`, `q`, `Ctrl-C` | beenden |
+
+### Verhalten
+
+* **Richtungen:** lokal → Reader (`push`), Reader → lokal (`pull`), lokal → lokal. Das linke Panel
+  ist lokal, das rechte zeigt den Reader (Speicher per `Ctrl-S` wechselbar). Reader → Reader ist
+  noch nicht unterstützt (MTP kann nicht streamend zwischen zwei Objekten kopieren) und wird mit
+  Hinweis abgelehnt.
+* **Kopieren** nutzt denselben Streaming-Kern wie `pull`/`push`. Existiert das Ziel bereits, fragt
+  die TUI nach; `y`/`Enter` bestätigt, `n`/`Esc` bricht ab. Ein laufender Transfer zeigt einen
+  Fortschrittsdialog, `Esc` bricht ihn ab (kooperativ, ohne das Gerät zu blockieren).
+* **Kein Löschen, kein Umbenennen, keine Rekursion** – wie im CLI-MVP. Ordner werden im Panel
+  angezeigt, aber `F5` kopiert nur Dateien.
+* **Nichts blockiert die Oberfläche:** Geräte-I/O läuft in einem eigenen Thread mit eigener
+  Tokio-Runtime; die UI verarbeitet währenddessen Tastendrücke und zeichnet Fortschritt.
+* **Freier Platz** wird nach jedem Transfer aktualisiert (Header und Statuszeile).
+* **Diagnose:** damit Log-Ausgaben nicht in die Vollbild-Oberfläche schreiben, gehen sie bei `-v`
+  in eine Datei (`$TMPDIR/booxmtp-tui.log`); der Pfad steht auch im Hilfebildschirm (`F1`).
+* **Fehler** erscheinen als Dialog mit Hinweis; fatale Fehler (kein Gerät, falsche Seriennummer)
+  beenden die TUI und werden wie beim CLI mit Exit-Code gemeldet.
+
 ## Exit-Codes
 
 | Code | Bedeutung |
@@ -193,6 +262,12 @@ src/
   transfer.rs      Streaming-Download/-Upload, .part-Handling, Verifikation
   output.rs        Tabellen, Größen/Datum/Namen, Fortschrittszeile
   error.rs         ein Fehlertyp mit Hinweisen und stabilen Exit-Codes
+  tui/
+    mod.rs         Terminal-Lebenszyklus (Alt-Screen, Panic-Hook, Restore) + Event-Loop
+    app.rs         reiner Zustandsautomat: Tasten/Events rein, Actions raus
+    entry.rs       Panel-Orte (lokal/remote) und einheitliche Datei-Einträge
+    worker.rs      Hintergrund-Thread mit Session, Request/Event-Kanälen, Cancel-Token
+    ui.rs          Rendering mit ratatui (Panels, Dialoge, Fortschritt, Hilfe)
 tests/
   remote_paths.rs        Pfadregeln gegen einen In-Memory-Baum
   storage_selection.rs   Alias-/ID-Auflösung inkl. Mehrdeutigkeit
@@ -209,9 +284,37 @@ Leitlinien:
 * Remote-Pfade werden segmentweise über den `RemoteFs`-Trait aufgelöst. Das hält die Logik ohne
   Hardware testbar und erlaubt später Preview-/Navigationsfunktionen in einer UI.
 
-### TUI/GUI vorbereitet
+### TUI-Architektur
 
-Die geplante zweite Ausbaustufe (TUI, danach GUI) kann direkt auf der Library aufsetzen:
+Die TUI ist bewusst in vier Schichten getrennt:
+
+```text
+ ratatui/crossterm            app.rs (pure state machine)          worker.rs (thread + runtime)
+ ┌──────────────┐   Tasten   ┌──────────────────────────┐ Request ┌──────────────────────────┐
+ │  ui.rs       │──────────▶ │ Panel/ Dialog/ Progress  │────────▶│ Session + tokio          │
+ │  (Rendering) │◀────────── │  → Vec<Action>           │◀────────│  MTP-Operationen         │
+ └──────────────┘   Screen   └──────────────────────────┘  Event  └──────────────────────────┘
+                                      ▲                                    │
+                                      └────────── CancelToken ◀────────────┘
+```
+
+* `app.rs` kennt weder Terminal noch Gerät: Tests füttern Tasten und Events und prüfen Zustand,
+  Dialoge und die erzeugten Actions.
+* `worker.rs` verarbeitet Requests strikt sequenziell (MTP hat eine Session). Fortschritt und
+  Ergebnisse kommen als Events zurück; Abbruch läuft über ein geteiltes `CancelToken`, damit ein
+  laufender Transfer nicht auf die nächste Nachricht warten muss.
+* `ui.rs` zeichnet nur; es schreibt außerdem die sichtbare Zeilenzahl zurück, damit `PgUp`/`PgDn`
+  bildschirmweise springen.
+* `mod.rs` besitzt den Terminal-Lebenszyklus: Alt-Screen + Raw-Mode, Panic-Hook von `ratatui`, und
+  ein Drop-Guard, der das Terminal auf jedem Rückweg wiederherstellt.
+
+Tests: Unit-Tests in der Library (inkl. Zustandsautomat und Rendering über `TestBackend`),
+Integrationstests für Pfadregeln und Storage-Auswahl, End-to-End-Tests gegen das virtuelle
+MTP-Gerät sowie ein PTY-Smoke-Test (`scripts/tui-smoke.py`, benötigt echte Hardware und `pyte`).
+
+### Weg zur GUI
+
+Eine GUI kann dieselbe Basis nutzen:
 
 ```rust
 use booxmtp::{RemotePath, Session, TransferOptions};
@@ -251,6 +354,22 @@ Die Integrationstests (`tests/device_integration.rs`) nutzen das `virtual-device
 `mtp-rs`: ein temporäres Verzeichnis wird als MTP-Speicher exponiert, inklusive Upload, Download,
 Kollisionen, `mkdir`, Unicode-Namen und Abbruch. Dadurch läuft die komplette Logik ohne Hardware.
 
+Die TUI wird auf drei Ebenen geprüft:
+
+1. **Zustandsautomat** (`src/tui/app.rs`): Navigation, Dialoge, Kopier-/Mkdir-Entscheidungen,
+   Konflikte, Abbruch, veraltete Antworten.
+2. **Rendering** (`src/tui/ui.rs`): `ratatui::TestBackend` rendert die Oberfläche in einen
+   Zeichenpuffer; die Tests prüfen Panels, Kopfzeile, Hilfe und Tastenleiste.
+3. **PTY-End-to-End** (`scripts/tui-smoke.py`, manuell): startet das echte Binary in einem
+   Pseudo-Terminal, bedient es mit Tasten und prüft die Bildschirminhalte. Es lädt eine Datei hoch,
+   lädt sie mit Überschreib-Bestätigung wieder herunter (SHA-256-Vergleich), legt einen Ordner an
+   und beendet die TUI. Benötigt einen angeschlossenen Reader:
+
+   ```bash
+   python3 -m venv .venv && .venv/bin/pip install pyte
+   .venv/bin/python scripts/tui-smoke.py --work /tmp/booxmtp-tui-smoke
+   ```
+
 Hardware-Checkliste (manuell, mit angeschlossenem Reader):
 
 1. `booxmtp devices` und `booxmtp storages` — Gerät und alle Speicher sichtbar.
@@ -270,6 +389,9 @@ Hardware-Checkliste (manuell, mit angeschlossenem Reader):
   atomar per `rename`, remote per Löschen-und-neu-Hochladen (MTP kann nicht atomar ersetzen).
 * **Kein `--json`:** die Datenmodelle (`DirListing`, `StorageEntry`, …) sind dafür vorbereitet, die
   Ausgabe ist aber noch rein menschenlesbar.
+* **TUI ohne Löschen/Umbenennen/Rekursion:** bewusst dieselbe Grenze wie das CLI-MVP. Die
+  Aktionsschicht (`app::Action`) ist so gebaut, dass diese Operationen später ergänzt werden können,
+  ohne die Oberfläche umzubauen.
 * **Streaming-Download über Fenster:** statt einer durchgehenden Bulk-Übertragung nutzt `pull`
   `download_windowed` (4 MiB-Fenster), damit die USB-Session zwischen Fenstern frei bleibt und ein
   Abbruch das Gerät nicht blockiert.
@@ -284,7 +406,8 @@ sind darauf vorbereitet.
 ## Getestete Umgebung
 
 * BOOX Go Color 7 (interner Speicher + microSD), macOS, Apple Silicon
-* `mtp-rs` 0.37, `tokio` 1.x, Rust 1.99 (Edition 2024)
+* CLI und TUI (PTY-End-to-End: Upload, Download mit Überschreib-Dialog, Ordner anlegen)
+* `mtp-rs` 0.37, `tokio` 1.x, `ratatui` 0.30, Rust 1.99 (Edition 2024)
 
 Andere BOOX-Modelle oder Firmware-Stände können Storage-Metadaten anders melden. `booxmtp
 storages -v` zeigt den Rohbefund (`storage_type`, `filesystem_type`, `removable`), was bei der

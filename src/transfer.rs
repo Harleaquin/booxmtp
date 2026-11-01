@@ -590,8 +590,15 @@ async fn remove_remote_partial(storage: &Storage, handle: ObjectHandle) -> Parti
 /// `mtp-rs` documents that Android honours a UTC (`Z`) suffix on uploads, so an absolute instant is
 /// sent rather than a zoneless local time.
 fn local_modification_time(metadata: &std::fs::Metadata) -> Option<DateTime> {
-    let modified = metadata.modified().ok()?;
-    let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    datetime_from_system_time(metadata.modified().ok()?)
+}
+
+/// Convert a host timestamp into an MTP datetime at UTC.
+///
+/// Useful for display and for uploads (`NewObjectInfo::with_modified`). Returns `None` for
+/// timestamps outside the range MTP can express.
+pub fn datetime_from_system_time(time: std::time::SystemTime) -> Option<DateTime> {
+    let since_epoch = time.duration_since(std::time::UNIX_EPOCH).ok()?;
     let seconds = i64::try_from(since_epoch.as_secs()).ok()?;
     DateTime::from_unix_seconds(seconds, UtcOffset::UTC)
 }

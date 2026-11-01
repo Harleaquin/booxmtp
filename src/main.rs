@@ -7,12 +7,13 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use booxmtp::cli::{self, Cli};
+use booxmtp::cli::{self, Cli, Command};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    cli::init_tracing(cli.verbose);
+    // The TUI must keep the terminal free of log output; it logs to a file instead.
+    cli::init_tracing(cli.verbose, matches!(cli.command, Command::Tui { .. }));
 
     match cli::run(cli).await {
         Ok(()) => ExitCode::SUCCESS,

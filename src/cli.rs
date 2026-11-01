@@ -125,6 +125,18 @@ appended. A target without a trailing slash is used verbatim.")]
         overwrite: bool,
     },
 
+    /// Open the two-panel terminal file manager (Midnight-Commander style).
+    #[command(after_help = "\
+Keys: arrows/Home/End/PgUp/PgDn move, Enter opens a folder, Backspace goes up, Tab switches \
+panels, F5 copies the selected file to the other panel, F7 creates a folder, F1 shows help, \
+F10 quits. Ctrl-S changes the storage of the active remote panel. \
+With -v, diagnostics are written to the file printed by F1 (not to the screen).")]
+    Tui {
+        /// Storage to show in the right panel on startup (default: internal).
+        #[arg(short, long, value_name = "STORAGE")]
+        storage: Option<String>,
+    },
+
     /// Create one remote folder.
     #[command(
         after_help = "The parent folder must already exist; intermediate folders are not created."
@@ -196,6 +208,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Mkdir { storage, remote } => {
             run_mkdir(cli.device.as_deref(), &storage, &remote, &context).await
         }
+        Command::Tui { storage } => run_tui(cli.device.clone(), storage).await,
     }
 }
 
@@ -435,6 +448,27 @@ async fn run_mkdir(
     Ok(())
 }
 
+/// Run the blocking TUI on this thread.
+///
+/// `block_in_place` keeps the multi-threaded runtime usable (the TUI's own I/O worker has its own
+/// thread and runtime anyway). `#[tokio::main]` uses the multi-thread flavour, which is required.
+async fn run_tui(serial: Option<String>, storage: Option<String>) -> Result<()> {
+    let flavor = tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor());
+    if matches!(flavor, Ok(tokio::runtime::RuntimeFlavor::MultiThread)) {
+        tokio::task::block_in_place(|| crate::tui::run(serial, storage))
+    } else {
+        // Single-threaded runtime (not used by the binary, but let embedders call this safely):
+        // run the blocking UI on its own thread.
+        std::thread::spawn(move || crate::tui::run(serial, storage))
+            .join()
+            .unwrap_or_else(|_| {
+                Err(Error::Worker {
+                    message: "the TUI thread panicked".to_string(),
+                })
+            })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -490,8 +524,11 @@ fn install_ctrl_c_handler(cancel: &CancelToken) {
     });
 }
 
-/// Configure `tracing` on stderr. `RUST_LOG` overrides the flag-based default.
-pub fn init_tracing(verbose: u8) {
+/// Configure `tracing`. `RUST_LOG` overrides the flag-based default.
+///
+/// The file manager draws on the alternate screen, so its diagnostics go to
+/// [`tui_log_path`] instead of the terminal — otherwise the first `warn!` would corrupt the UI.
+pub fn init_tracing(verbose: u8, into_file: bool) {
     use tracing_subscriber::EnvFilter;
 
     let level = match verbose {
@@ -502,10 +539,30 @@ pub fn init_tracing(verbose: u8) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("booxmtp={level},mtp_rs={level}")));
 
+    if into_file {
+        // `Arc<File>` implements `MakeWriter` through `&File: Write`, so all threads can share it.
+        // If the file cannot be created, logging stays off: writing to the terminal would corrupt
+        // the alternate screen.
+        if let Ok(file) = std::fs::File::create(tui_log_path()) {
+            let writer = std::sync::Arc::new(file);
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(writer)
+                .with_ansi(false)
+                .try_init();
+        }
+        return;
+    }
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// Where the file manager writes its diagnostics.
+pub fn tui_log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("booxmtp-tui.log")
 }
 
 /// Print an error and its hint the way the CLI wants them.
