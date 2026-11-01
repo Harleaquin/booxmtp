@@ -2,6 +2,8 @@
 
 **English** · [Deutsch](README.de.md)
 
+[![CI](https://github.com/Harleaquin/booxmtp/actions/workflows/ci.yml/badge.svg)](https://github.com/Harleaquin/booxmtp/actions/workflows/ci.yml)
+
 File transfer between macOS/Linux and Android-based MTP e-readers — developed and tested with a
 **BOOX Go Color 7**. Pure Rust, no Finder mount, no Android File Transfer, no `libmtp`/FFI.
 
@@ -75,6 +77,27 @@ cargo build --release
 # or system-wide:
 cargo install --path .
 ```
+
+### Prebuilt binaries
+
+Every tagged release ships binaries on the
+[releases page](https://github.com/Harleaquin/booxmtp/releases):
+
+| Platform | Archive |
+|---|---|
+| Linux (x86_64) | `booxmtp-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS (Apple Silicon + Intel) | `booxmtp-<version>-universal-apple-darwin.tar.gz` |
+
+```bash
+# after downloading the archive and SHA256SUMS from the release page
+sha256sum -c SHA256SUMS          # macOS: shasum -a 256 -c SHA256SUMS
+tar -xzf booxmtp-*.tar.gz
+./booxmtp --help
+```
+
+On macOS, clear the quarantine flag if Gatekeeper complains:
+`xattr -d com.apple.quarantine booxmtp`. The binaries are self-contained; only the optional
+`booxmtp mount` needs `cargo install mtp-mount` plus a FUSE driver.
 
 ## Commands
 
