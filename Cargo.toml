@@ -1,0 +1,19 @@
+[package]
+name = "booxmtp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+description = "File transfer between macOS and Android-based MTP e-readers (BOOX)"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+mtp-rs = { version = "0.37", features = ["tracing"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+mtp-rs = { version = "0.37", features = ["virtual-device"] }
+tempfile = "3.27.0"
