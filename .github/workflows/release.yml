@@ -15,7 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux x86_64
+          - name: Linux x86_64 (static)
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - name: Linux x86_64 (glibc)
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - name: macOS universal
@@ -48,8 +51,12 @@ jobs:
             # Ad-hoc signature; the binary is still not notarised.
             codesign --force --sign - dist/stage/booxmtp
           else
-            cargo build --release
-            cp target/release/booxmtp dist/stage/booxmtp
+            if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq musl-tools
+            fi
+            cargo build --release --target "${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/release/booxmtp" dist/stage/booxmtp
           fi
 
           cp LICENSE README.md README.de.md dist/stage/

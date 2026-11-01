@@ -85,8 +85,12 @@ Every tagged release ships binaries on the
 
 | Platform | Archive |
 |---|---|
-| Linux (x86_64) | `booxmtp-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (x86_64, static) | `booxmtp-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux (x86_64, glibc 2.39+) | `booxmtp-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS (Apple Silicon + Intel) | `booxmtp-<version>-universal-apple-darwin.tar.gz` |
+
+The **static musl build** runs on any Linux distribution; the glibc build is a regular dynamic
+binary and needs glibc 2.39 or newer.
 
 ```bash
 # after downloading the archive and SHA256SUMS from the release page
