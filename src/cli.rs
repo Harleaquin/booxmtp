@@ -45,7 +45,8 @@ EXAMPLES
   booxmtp ls --storage internal /Books
   booxmtp pull --storage sd /Books/Roman.epub ./Roman.epub
   booxmtp push --storage internal ./Notes.pdf /Documents/
-  booxmtp mkdir --storage sd /Books/ToRead"
+  booxmtp mkdir --storage sd /Books/ToRead
+  booxmtp mount --storage internal ~/mnt/reader"
 )]
 pub struct Cli {
     /// Serial number of the device to use (required when several are connected).
@@ -123,6 +124,33 @@ appended. A target without a trailing slash is used verbatim.")]
         /// Replace the remote object if it already exists.
         #[arg(long)]
         overwrite: bool,
+    },
+
+    /// Mount the reader as a local filesystem (macOS/Linux, via the `mtp-mount` helper).
+    #[command(after_help = "\
+Mounting needs a FUSE driver (macFUSE or FUSE-T on macOS, fuse3 on Linux) and the helper \
+`cargo install mtp-mount`. All storages appear as sub-folders of MOUNTPOINT; `--storage` validates \
+the selector and prints the exact path. The mount is read-only unless `--read-write` is given. \
+Ctrl-C unmounts. Windows is not supported: Explorer exposes MTP devices natively.")]
+    Mount {
+        /// Storage to point at (validated; the mount still shows every storage as a sub-folder).
+        #[arg(short, long, value_name = "STORAGE")]
+        storage: Option<String>,
+
+        /// Allow writes (default: read-only).
+        #[arg(long)]
+        read_write: bool,
+
+        /// Keep the mount alive for this many seconds when the device drops off.
+        #[arg(long, value_name = "SECONDS")]
+        reconnect_timeout: Option<u64>,
+
+        /// Directory where the helper buffers writes (defaults to its cache directory).
+        #[arg(long, value_name = "PATH")]
+        spool_dir: Option<PathBuf>,
+
+        /// Existing, empty directory to mount on.
+        mountpoint: PathBuf,
     },
 
     /// Open the two-panel terminal file manager (Midnight-Commander style).
@@ -208,6 +236,25 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Mkdir { storage, remote } => {
             run_mkdir(cli.device.as_deref(), &storage, &remote, &context).await
+        }
+        Command::Mount {
+            storage,
+            read_write,
+            reconnect_timeout,
+            spool_dir,
+            mountpoint,
+        } => {
+            run_mount(
+                cli.device.as_deref(),
+                storage.as_deref(),
+                crate::mount::MountRequest {
+                    mountpoint,
+                    read_only: !read_write,
+                    reconnect_timeout,
+                    spool_dir,
+                },
+            )
+            .await
         }
         Command::Tui { storage } => run_tui(cli.device.clone(), storage).await,
     }
@@ -447,6 +494,15 @@ async fn run_mkdir(
     );
     close_quietly(session).await;
     Ok(())
+}
+
+/// Mount the reader as a filesystem (thin wrapper around `mtp-mount`).
+async fn run_mount(
+    serial: Option<&str>,
+    storage: Option<&str>,
+    request: crate::mount::MountRequest,
+) -> Result<()> {
+    crate::mount::run(serial, storage, request).await
 }
 
 /// Run the blocking TUI on this thread.

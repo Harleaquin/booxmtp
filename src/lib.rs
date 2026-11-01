@@ -10,6 +10,7 @@
 //! | [`remote_path`] | normalisation and segment-wise resolution of remote paths |
 //! | [`transfer`] | streaming download/upload, atomic local writes, verification |
 //! | [`tree`] | recursive copy, move and delete across host and reader |
+//! | [`mount`] | thin wrapper that mounts the reader via the `mtp-mount` helper |
 //! | [`session`] | UI-agnostic façade tying the above together |
 //! | [`output`] | byte/date/name formatting, tables, progress line |
 //! | [`error`] | one error type with hints and stable exit codes |
@@ -46,6 +47,7 @@ pub mod cli;
 pub mod device;
 pub mod error;
 pub mod location;
+pub mod mount;
 pub mod output;
 pub mod remote_path;
 pub mod session;

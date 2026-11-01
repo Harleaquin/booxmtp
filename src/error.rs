@@ -90,6 +90,26 @@ pub enum Error {
     #[error("the device reports no storage")]
     NoStorage,
 
+    /// The `mtp-mount` helper that implements the actual filesystem is not installed.
+    #[error("the mount helper `mtp-mount` is not installed")]
+    MountHelperMissing,
+
+    /// The mount helper failed (driver missing, mount point busy, device error, …).
+    #[error("mounting failed: {message}")]
+    MountFailed {
+        /// What the helper reported.
+        message: String,
+    },
+
+    /// The requested mount point is not a usable directory.
+    #[error("mount point `{path}` {reason}", path = .path.display())]
+    InvalidMountpoint {
+        /// The path that was rejected.
+        path: PathBuf,
+        /// Why it was rejected.
+        reason: String,
+    },
+
     /// The operation is understood but not implemented by `booxmtp` yet.
     #[error("{what}")]
     UnsupportedByApp {
@@ -340,6 +360,20 @@ impl Error {
                 "unlock the reader, make sure a storage volume is mounted, then try again."
                     .to_string(),
             ),
+            Error::MountHelperMissing => Some(
+                "install the mount helper with `cargo install mtp-mount` (it needs macFUSE or \
+                 FUSE-T on macOS, fuse3 on Linux)."
+                    .to_string(),
+            ),
+            Error::MountFailed { .. } => Some(
+                "check that a FUSE driver is installed (macFUSE/FUSE-T on macOS, fuse3 on Linux) \
+                 and that the mount point is empty and not already mounted."
+                    .to_string(),
+            ),
+            Error::InvalidMountpoint { .. } => Some(
+                "create an empty directory first, e.g. `mkdir -p ~/mnt/reader`, and mount there."
+                    .to_string(),
+            ),
             Error::UnsupportedByApp { .. } => {
                 Some("use a local panel in between (download first, then upload).".to_string())
             }
@@ -463,7 +497,10 @@ impl Error {
             | Error::StorageNotFound { .. }
             | Error::StorageReadOnly { .. }
             | Error::NoStorage => exit_code::STORAGE_SELECTION,
-            Error::Unsupported { .. } | Error::UnsupportedByApp { .. } => exit_code::FAILURE,
+            Error::Unsupported { .. }
+            | Error::UnsupportedByApp { .. }
+            | Error::MountHelperMissing
+            | Error::MountFailed { .. } => exit_code::FAILURE,
             Error::InvalidRemotePath { .. }
             | Error::RemotePathNotFound { .. }
             | Error::RemoteNotADirectory { .. }
@@ -472,7 +509,8 @@ impl Error {
             | Error::LocalNotAFile { .. }
             | Error::LocalDirectoryMissing { .. }
             | Error::LocalAlreadyExists { .. }
-            | Error::LocalIsDirectory { .. } => exit_code::LOCAL_IO,
+            | Error::LocalIsDirectory { .. }
+            | Error::InvalidMountpoint { .. } => exit_code::LOCAL_IO,
             Error::RemoteAlreadyExists { .. } | Error::InsufficientSpace { .. } => {
                 exit_code::CONFLICT
             }

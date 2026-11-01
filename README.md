@@ -34,9 +34,11 @@ Der MVP aus `PLAN.md` ist umgesetzt und auf echter Hardware verifiziert:
 * **TUI im Midnight-Commander-Stil** (`booxmtp tui`): zwei Panels (lokal ↔ Reader), Navigation,
   Mehrfachauswahl, Kopieren, **Verschieben**, **Löschen mit Rückfrage**, rekursive Ordner,
   Fortschritt/Abbrechen, Storage-Wechsel, Hilfebildschirm
+* **Mount (macOS/Linux)** über `booxmtp mount` – ein Wrapper um den erprobten `mtp-mount`-Helper
+  (Details und Voraussetzungen unten)
 
 Noch nicht enthalten (bewusst, siehe „Nicht-Ziele“): Synchronisation, `--json`, GUI, Löschen/
-Verschieben im CLI (bisher nur in der TUI).
+Verschieben im CLI (bisher nur in der TUI), Mount unter Windows.
 
 ## Voraussetzungen
 
@@ -87,6 +89,8 @@ booxmtp [--device <SERIAL>] [-v] [--no-progress] <COMMAND>
                                    Datei hochladen
   mkdir    -s <STORAGE> <REMOTE>   Ordner anlegen
   tui      [-s <STORAGE>]          Interaktiver Zwei-Panel-Dateimanager
+  mount    [-s <STORAGE>] [OPTIONEN] <MOUNTPOINT>
+                                   Reader als Dateisystem einhängen (macOS/Linux)
 ```
 
 Globale Optionen:
@@ -110,6 +114,7 @@ booxmtp push --storage 65537 ./Notizen.pdf /Documents/Notizen.pdf
 booxmtp mkdir --storage sd /Books/ToRead
 booxmtp tui                       # Dateimanager: links lokal, rechts internal
 booxmtp tui --storage sd          # rechte Seite startet auf der SD-Karte
+booxmtp mount --storage internal ~/mnt/reader   # als Dateisystem einhängen (read-only)
 ```
 
 ### Storage-Auswahl
@@ -247,6 +252,64 @@ Abbruch (im Transfer-Dialog bricht `Esc` ab). Einzige Ausnahme ohne `Ctrl` ist `
 * **Fehler** erscheinen als Dialog mit Hinweis; fatale Fehler (kein Gerät, falsche Seriennummer)
   beenden die TUI und werden wie beim CLI mit Exit-Code gemeldet.
 
+## Mounten (macOS/Linux)
+
+```bash
+cargo install mtp-mount                    # erledigt das eigentliche Einhängen (FUSE)
+cargo install --path .                     # booxmtp selbst braucht keine FUSE-Build-Abhängigkeit
+mkdir -p ~/mnt/reader
+booxmtp mount --storage internal ~/mnt/reader
+
+ls  ~/mnt/reader/"Interner gemeinsamer Speicher"/Books
+cp  ./Roman.epub ~/mnt/reader/"Interner gemeinsamer Speicher"/Books/   # nur mit --read-write
+```
+
+`booxmtp mount` ist bewusst ein **Wrapper um [`mtp-mount`](https://crates.io/crates/mtp-mount)** und
+keine eigene FUSE-Implementierung: MTP braucht für ein Dateisystem lokales Spooling (die Größe ist
+erst bei `close()` bekannt), eine eigene Inode-Tabelle gegen instabile Objekt-Handles, Caches und
+Reconnect-Logik. `mtp-mount` (MIT/Apache, gleicher `mtp-rs`-Stack) löst das bereits in ~5.400 Zeilen
+mit 128 Tests. Wir setzen nur unsere Geräte- und Storage-Auswahl davor – und bleiben damit frei von
+FUSE-Build-Abhängigkeiten und Treiber-Code.
+
+### Voraussetzungen
+
+| Plattform | Was gebraucht wird |
+|---|---|
+| Linux | `fuse3` (z. B. `sudo apt install fuse3`), ggf. Mitgliedschaft in der Gruppe `fuse` |
+| macOS | [macFUSE](https://macfuse.github.io/) inkl. Entwicklungsdateien (`fuse.pc`, `libfuse`) und `pkg-config` – der getestete Pfad; FUSE-T ist eine Alternative, siehe Teststatus |
+| Windows | **nicht unterstützt** – der Explorer hängt MTP über WPD ohnehin nativ ein |
+
+`mtp-mount` wird separat installiert (`cargo install mtp-mount`); `booxmtp` prüft das beim Start und
+nennt den Installationsbefehl, wenn es fehlt. Ein anders gebauter Helper lässt sich über
+`BOOXMTP_MOUNT_HELPER=/pfad/zu/mtp-mount` verwenden.
+
+### Verhalten
+
+* Der Mount zeigt **alle** Storages als Unterordner: `<MOUNTPOINT>/<Gerätebeschreibung>`.
+  `--storage internal` prüft den Alias mit derselben Logik wie alle anderen Befehle und nennt den
+  exakten Pfad (inkl. Hinweis, wenn keine SD-Karte erkannt wird).
+* **Read-only ist der Default.** `--read-write` erlaubt Schreibzugriff; `mtp-mount` puffert
+  Schreibvorgänge lokal und lädt sie beim Schließen hoch. Der Spool liegt standardmäßig im
+  Cache-Verzeichnis und lässt sich mit `--spool-dir <PATH>` umlenken (Platz für die größte Datei
+  einplanen).
+* `--reconnect-timeout <SEKUNDEN>` hält den Mount bei einem Kabelwackler am Leben.
+* `Ctrl-C` unmountet sauber; alternativ `umount <MOUNTPOINT>` (Linux) bzw.
+  `diskutil unmount <MOUNTPOINT>` (macOS).
+* Dateisystem-Semantik bleibt MTP: Rechte/Besitzer sind erfunden, es gibt keine Symlinks, xattrs
+  oder harten Links; Finder/Spotlight erzeugen viele Zugriffe (der Helper cached); In-Place-
+  Änderungen laufen über Download + Upload; das Gerät hat eine MTP-Session, Zugriffe werden
+  serialisiert. Read-only ist deshalb der sichere Default.
+
+### Ehrlicher Teststatus
+
+Der Wrapper ist auf dem BOOX verifiziert bis zur Übergabe an den Helper: Gerätewahl, Storage-Alias,
+Mountpoint-Prüfung, Fehlerpfade und Prozess-/Signal-Handling funktionieren. Das eigentliche
+Einhängen konnte auf dem Entwicklungs-Mac nicht abgeschlossen werden – fuser 0.18 + FUSE-T 1.2.9
+bricht mit `Short read of FUSE request header` ab, und macFUSE ist dort ohne Entwicklungsdateien
+installiert (`pkg-config`/`libfuse` fehlen), sodass der Mount nicht gebaut werden konnte. Auf Linux
+ist der von `mtp-mount` getestete Pfad. Wenn der Mount bei dir scheitert, sagt der Wrapper das mit
+Hinweis auf FUSE-Treiber und Mountpoint.
+
 ## Exit-Codes
 
 | Code | Bedeutung |
@@ -287,6 +350,7 @@ src/
   location.rs      Panel-Orte (lokal oder Storage + Remote-Pfad), im Core für Copy/Move/Delete
   remote_path.rs   Pfadnormalisierung + segmentweises Auflösen (RemoteFs-Trait)
   tree.rs          rekursives Kopieren, Verschieben und Löschen (Host ↔ Reader)
+  mount.rs         Wrapper: Geräte-/Storage-Auswahl + Start des `mtp-mount`-Helpers
   transfer.rs      Streaming-Download/-Upload, .part-Handling, Verifikation
   output.rs        Tabellen, Größen/Datum/Namen, Fortschrittszeile
   error.rs         ein Fehlertyp mit Hinweisen und stabilen Exit-Codes
@@ -339,8 +403,9 @@ Die TUI ist bewusst in vier Schichten getrennt:
 Tests: Unit-Tests in der Library (inkl. Zustandsautomat und Rendering über `TestBackend`),
 Integrationstests für Pfadregeln und Storage-Auswahl, End-to-End-Tests gegen das virtuelle
 MTP-Gerät (`device_integration.rs`) und für rekursive Copy/Move/Delete-Operationen
-(`tree_ops.rs`) sowie ein PTY-Smoke-Test (`scripts/tui-smoke.py`, benötigt echte Hardware und
-`pyte`). Letzterer markiert drei Einträge (zwei Dateien und einen Ordner), kopiert sie als Stapel,
+(`tree_ops.rs`), Unit-Tests für den Mount-Wrapper (Storage-Unterordner, Argumentabbildung,
+Mountpoint-Prüfung) sowie ein PTY-Smoke-Test (`scripts/tui-smoke.py`, benötigt echte Hardware und
+`pyte`). Der Mount selbst braucht einen FUSE-Treiber und `mtp-mount` und läuft deshalb nicht in CI. Letzterer markiert drei Einträge (zwei Dateien und einen Ordner), kopiert sie als Stapel,
 löscht den Ordner rekursiv auf dem Gerät, lädt eine Datei mit Überschreib-Bestätigung zurück und
 prüft die SHA-256-Summe.
 
@@ -429,14 +494,18 @@ Hardware-Checkliste (manuell, mit angeschlossenem Reader):
 * **Datei ersetzt keinen Ordner:** auch mit `--overwrite` wird ein Ordner nicht durch eine Datei
   ersetzt; das wäre zu destruktiv für eine einzelne Bestätigung. Ordner ersetzen Dateien dagegen
   schon (mit Rückfrage).
+* **Mount als Wrapper statt eigener FUSE-Stack:** `booxmtp` enthält keinen Dateisystem-Treiber,
+  sondern startet `mtp-mount` (MIT/Apache) mit derselben Geräte- und Storage-Auswahl. Das spart
+  einen zweiten, schlechter getesteten Schreibpfad und hält unseren Build frei von macFUSE-/
+  libfuse-Abhängigkeiten. Windows bleibt außen vor (WPD im Explorer).
 * **Streaming-Download über Fenster:** statt einer durchgehenden Bulk-Übertragung nutzt `pull`
   `download_windowed` (4 MiB-Fenster), damit die USB-Session zwischen Fenstern frei bleibt und ein
   Abbruch das Gerät nicht blockiert.
 
 ## Nicht-Ziele des MVP
 
-FUSE-Mount, Hintergrund-Sync, WLAN/BOOXDrop, automatisches Löschen, Windows-Support und ein eigener
-MTP-Protokollstack. Ein `libmtp`-Backend ist als Fallback denkbar,
+Ein eigener FUSE-Stack, Mount unter Windows, Hintergrund-Sync, WLAN/BOOXDrop, automatisches Löschen
+und ein eigener MTP-Protokollstack. Ein `libmtp`-Backend ist als Fallback denkbar,
 falls ein Gerät mit `mtp-rs` nicht zusammenarbeitet; die Modulgrenzen (`RemoteFs`, `StorageEntry`)
 sind darauf vorbereitet.
 
@@ -445,6 +514,8 @@ sind darauf vorbereitet.
 * BOOX Go Color 7 (interner Speicher + microSD), macOS, Apple Silicon
 * CLI und TUI (PTY-End-to-End: Stapel-Kopie inkl. Ordner, rekursives Löschen mit Rückfrage,
   Download mit Überschreib-Dialog, Ordner anlegen, SHA-256-Roundtrip)
+* Mount-Wrapper bis zur Helper-Übergabe; der eigentliche FUSE-Mount scheiterte lokal an
+  FUSE-T 1.2.9 + fuser 0.18 (macFUSE ohne Dev-Dateien vorhanden), siehe Abschnitt „Mounten“
 * `mtp-rs` 0.37, `tokio` 1.x, `ratatui` 0.30, Rust 1.99 (Edition 2024)
 
 Andere BOOX-Modelle oder Firmware-Stände können Storage-Metadaten anders melden. `booxmtp
