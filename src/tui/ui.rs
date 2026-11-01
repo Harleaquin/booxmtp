@@ -94,14 +94,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_key_bar(frame: &mut Frame, area: Rect) {
     let keys = [
-        ("F1", "Help"),
-        ("F5", "Copy"),
-        ("F7", "MkDir"),
-        ("F10", "Quit"),
-        ("Tab", "Switch"),
-        ("Ctrl-U", "Swap"),
+        ("Ctrl-C", "Copy"),
+        ("Ctrl-N", "New"),
+        ("Ctrl-Q", "Quit"),
         ("Ctrl-R", "Reload"),
         ("Ctrl-S", "Storage"),
+        ("Ctrl-U", "Swap"),
+        ("?", "Help"),
     ];
     let mut spans = Vec::new();
     for (index, (key, label)) in keys.iter().enumerate() {
@@ -460,15 +459,16 @@ fn draw_help(frame: &mut Frame, scroll: u16, area: Rect) {
         "  Ctrl-S          choose storage (remote panel)",
         "",
         "Files",
-        "  F5              copy selected file to the other panel",
-        "  F7              create a folder",
+        "  Ctrl-C          copy selected file to the other panel",
+        "  Ctrl-N          create a folder",
         "",
         "Other",
-        "  F1              this help",
-        "  F10, Esc, q     quit",
-        "  Ctrl-C          quit immediately",
+        "  ?               this help",
+        "  Ctrl-Q, Esc, q  quit",
         "",
         "Notes",
+        "  • No function keys: terminals and tmux intercept them too",
+        "    inconsistently. Ctrl-C is Copy here, not an interrupt.",
         "  • Folders are not copied recursively (yet).",
         "  • Existing files are only replaced after confirmation.",
         "  • Copying between two remote folders is not supported;",
@@ -668,20 +668,20 @@ mod tests {
         );
         assert!(screen.contains("local.txt"), "file missing:\n{screen}");
         assert!(screen.contains("Books/"), "folder missing:\n{screen}");
-        assert!(screen.contains("F5 Copy"), "key bar missing:\n{screen}");
-        assert!(screen.contains("F10 Quit"), "key bar missing:\n{screen}");
+        assert!(screen.contains("Ctrl-C Copy"), "key bar missing:\n{screen}");
+        assert!(screen.contains("Ctrl-Q Quit"), "key bar missing:\n{screen}");
     }
 
     #[test]
     fn help_dialog_is_rendered_and_closes() {
         let mut app = app_with_listing();
         app.on_key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::F(1),
+            ratatui::crossterm::event::KeyCode::Char('?'),
             ratatui::crossterm::event::KeyModifiers::NONE,
         ));
         let screen = render(&mut app, 100, 30);
         assert!(screen.contains("Help"), "help title missing:\n{screen}");
-        assert!(screen.contains("F7"), "help body missing:\n{screen}");
+        assert!(screen.contains("Ctrl-N"), "help body missing:\n{screen}");
     }
 
     #[test]

@@ -410,11 +410,15 @@ impl App {
     }
 
     /// Handle one key press.
+    ///
+    /// There are deliberately no function-key bindings: terminals, terminal multiplexers and
+    /// remote sessions intercept them inconsistently. Every command is a `Ctrl` combination
+    /// (`Ctrl-C` copies, `Ctrl-N` creates, `Ctrl-Q` quits); only `?` for help is a plain key.
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        // Ctrl-C always quits, even mid-transfer (the worker cancels on shutdown).
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-        {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Ctrl-Q quits from anywhere, including open dialogs (the worker cancels on shutdown).
+        if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             self.should_quit = true;
             return Vec::new();
         }
@@ -424,17 +428,20 @@ impl App {
         }
 
         if self.screen == Screen::Connecting {
-            if matches!(key.code, KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q')) {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
                 self.should_quit = true;
             }
             return Vec::new();
         }
 
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
         match key.code {
             KeyCode::Char('q') if !ctrl => {
                 self.should_quit = true;
+                Vec::new()
+            }
+            KeyCode::Char('c') if ctrl => self.copy_selected(),
+            KeyCode::Char('n') if ctrl => {
+                self.open_mkdir_dialog();
                 Vec::new()
             }
             KeyCode::Char('u') if ctrl => {
@@ -447,6 +454,10 @@ impl App {
             }
             KeyCode::Char('s') if ctrl => {
                 self.open_storage_picker();
+                Vec::new()
+            }
+            KeyCode::Char('?') => {
+                self.dialog = Some(Dialog::Help { scroll: 0 });
                 Vec::new()
             }
             KeyCode::Up => {
@@ -479,16 +490,7 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Right => self.open_selected(),
             KeyCode::Backspace | KeyCode::Left => self.go_parent(),
-            KeyCode::F(1) => {
-                self.dialog = Some(Dialog::Help { scroll: 0 });
-                Vec::new()
-            }
-            KeyCode::F(5) => self.copy_selected(),
-            KeyCode::F(7) => {
-                self.open_mkdir_dialog();
-                Vec::new()
-            }
-            KeyCode::F(10) | KeyCode::Esc => {
+            KeyCode::Esc => {
                 self.should_quit = true;
                 Vec::new()
             }
@@ -568,7 +570,7 @@ impl App {
             return self.go_parent();
         }
         if !entry.is_dir() {
-            self.status = format!("{} — F5 copies it to the other panel", entry.name);
+            self.status = format!("{} — Ctrl-C copies it to the other panel", entry.name);
             return Vec::new();
         }
         let Some(child) = self.panel(panel_id).location.child(&entry.name) else {
@@ -759,7 +761,7 @@ impl App {
                 Vec::new()
             }
             Dialog::Help { scroll } => match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::F(1) => {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
                     self.dialog = None;
                     Vec::new()
                 }
@@ -1196,7 +1198,7 @@ mod tests {
         select_by_name(app, PanelId::Left, "book.epub");
         let actions = app.on_key(key(KeyCode::Enter));
         assert!(actions.is_empty());
-        assert!(app.status.contains("F5"));
+        assert!(app.status.contains("Ctrl-C"));
         assert!(app.dialog.is_none());
     }
 
@@ -1207,7 +1209,7 @@ mod tests {
         app.active = PanelId::Left;
         select_by_name(app, PanelId::Left, "book.epub");
 
-        let actions = app.on_key(key(KeyCode::F(5)));
+        let actions = app.on_key(ctrl('c'));
         let [Action::Copy(request)] = actions.as_slice() else {
             panic!("expected a copy action, got {actions:?}");
         };
@@ -1226,7 +1228,7 @@ mod tests {
         app.panels[1].entries = vec![remote_entry("Other.epub", EntryKind::File)];
         app.panels[1].selected = 0;
 
-        let actions = app.on_key(key(KeyCode::F(5)));
+        let actions = app.on_key(ctrl('c'));
         let [Action::Copy(request)] = actions.as_slice() else {
             panic!("expected a copy action, got {actions:?}");
         };
@@ -1244,7 +1246,7 @@ mod tests {
         // Pretend the target folder already contains that name.
         app.panels[1].entries = vec![remote_entry("book.epub", EntryKind::File)];
 
-        let actions = app.on_key(key(KeyCode::F(5)));
+        let actions = app.on_key(ctrl('c'));
         assert!(actions.is_empty(), "nothing may happen before confirmation");
         assert!(matches!(
             app.dialog,
@@ -1258,7 +1260,7 @@ mod tests {
         assert!(!app.busy);
 
         // Now confirm with "y".
-        app.on_key(key(KeyCode::F(5)));
+        app.on_key(ctrl('c'));
         let actions = app.on_key(key(KeyCode::Char('y')));
         let [Action::Copy(request)] = actions.as_slice() else {
             panic!("expected a copy action after confirmation");
@@ -1273,12 +1275,12 @@ mod tests {
         let app = &mut fixture.app;
         app.active = PanelId::Left;
         app.panels[0].selected = 0; // ".."
-        assert!(app.on_key(key(KeyCode::F(5))).is_empty());
+        assert!(app.on_key(ctrl('c')).is_empty());
         assert!(app.status.contains("Only files"));
 
         select_by_name(app, PanelId::Left, "Sub");
         app.status.clear();
-        assert!(app.on_key(key(KeyCode::F(5))).is_empty());
+        assert!(app.on_key(ctrl('c')).is_empty());
         assert!(app.status.contains("Only files"));
     }
 
@@ -1287,7 +1289,7 @@ mod tests {
         let mut fixture = fixture();
         let app = &mut fixture.app;
         app.active = PanelId::Left;
-        let actions = app.on_key(key(KeyCode::F(7)));
+        let actions = app.on_key(ctrl('n'));
         assert!(actions.is_empty());
         assert!(matches!(app.dialog, Some(Dialog::Input { .. })));
 
@@ -1307,7 +1309,7 @@ mod tests {
     fn f7_rejects_empty_or_path_like_names() {
         let mut fixture = fixture();
         let app = &mut fixture.app;
-        app.on_key(key(KeyCode::F(7)));
+        app.on_key(ctrl('n'));
         let actions = app.on_key(key(KeyCode::Enter));
         assert!(actions.is_empty());
         assert!(matches!(
@@ -1317,7 +1319,7 @@ mod tests {
 
         // Start again and type a slash.
         app.on_key(key(KeyCode::Enter)); // close the message
-        app.on_key(key(KeyCode::F(7)));
+        app.on_key(ctrl('n'));
         app.on_key(key(KeyCode::Char('a')));
         app.on_key(key(KeyCode::Char('/')));
         app.on_key(key(KeyCode::Char('b')));
@@ -1547,16 +1549,58 @@ mod tests {
 
     #[test]
     fn quit_keys_are_consistent() {
-        for quit in [
-            key(KeyCode::F(10)),
-            key(KeyCode::Esc),
-            key(KeyCode::Char('q')),
-            ctrl('c'),
-        ] {
+        for quit in [ctrl('q'), key(KeyCode::Esc), key(KeyCode::Char('q'))] {
             let mut fixture = fixture();
             fixture.app.on_key(quit);
             assert!(fixture.app.should_quit, "{quit:?} should quit");
         }
+    }
+
+    #[test]
+    fn ctrl_c_copies_instead_of_quitting() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.active = PanelId::Left;
+        select_by_name(app, PanelId::Left, "book.epub");
+
+        let actions = app.on_key(ctrl('c'));
+        assert!(!app.should_quit, "Ctrl-C must not quit anymore");
+        assert!(matches!(actions.as_slice(), [Action::Copy(_)]));
+    }
+
+    #[test]
+    fn function_keys_are_not_bound() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        for code in [KeyCode::F(1), KeyCode::F(5), KeyCode::F(7), KeyCode::F(10)] {
+            assert!(
+                app.on_key(key(code)).is_empty(),
+                "{code:?} must not trigger anything"
+            );
+            assert!(!app.should_quit);
+        }
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn ctrl_q_quits_even_with_a_dialog_open() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.on_key(ctrl('n'));
+        assert!(matches!(app.dialog, Some(Dialog::Input { .. })));
+        app.on_key(ctrl('q'));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn question_mark_opens_help() {
+        let mut fixture = fixture();
+        let app = &mut fixture.app;
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(matches!(app.dialog, Some(Dialog::Help { .. })));
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.dialog.is_none());
+        assert!(!app.should_quit, "Esc closes the help instead of quitting");
     }
 
     #[test]

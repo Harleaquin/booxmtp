@@ -175,15 +175,15 @@ Eine echte Aufnahme (100 % Terminal, keine Mockups):
 │src/                                                      ││American Gods_ Roman (German Edition) - Neil Gai 665.6 KiB│
 │target/                                                   ││Atta Troll_ Erweiterte Ausgabe (German Edition)  159.9 KiB│
 │tests/                                                    ││Bedenke Phlebas - Iain Banks.mobi                810.2 KiB│
-│.gitignore                                       8 B      ││besten Erzahlungen des H.P. Lovecraft_ Berge des 988.6 KiB│
-│Cargo.lock                                       63.3 KiB ││Blicke windwaerts - Iain Banks.mobi              636.8 KiB│
-│Cargo.toml                                       707 B    ││Caesar's Messiah_ The Roman Conspiracy to Invent 1.5 MiB  │
+│.gitignore                                       28 B     ││besten Erzahlungen des H.P. Lovecraft_ Berge des 988.6 KiB│
+│Cargo.lock                                       63.2 KiB ││Blicke windwaerts - Iain Banks.mobi              636.8 KiB│
+│Cargo.toml                                       688 B    ││Caesar's Messiah_ The Roman Conspiracy to Invent 1.5 MiB  │
 │PLAN.md                                          14.9 KiB ││Call of Cthulhu_ 67 Tales of Horror by H.P. Love 1.8 MiB  │
-│README.md                                        12.9 KiB ││Can Such Things Be_ - Ambrose Bierce.epub        255.8 KiB│
+│README.md                                        22.0 KiB ││Can Such Things Be_ - Ambrose Bierce.epub        255.8 KiB│
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
  ..                                                                                                                     
  Connected                                                                                                              
-F1 Help  F5 Copy  F7 MkDir  F10 Quit  Tab Switch  Ctrl-U Swap  Ctrl-R Reload  Ctrl-S Storage
+Ctrl-C Copy  Ctrl-N New  Ctrl-Q Quit  Ctrl-R Reload  Ctrl-S Storage  Ctrl-U Swap  ? Help
 ```
 
 ### Tasten
@@ -197,10 +197,15 @@ F1 Help  F5 Copy  F7 MkDir  F10 Quit  Tab Switch  Ctrl-U Swap  Ctrl-R Reload  Ct
 | `Ctrl-U` | Panels tauschen (Positionen inklusive) |
 | `Ctrl-R` | beide Panels und die Speicher-Metadaten neu laden |
 | `Ctrl-S` | Speicher des aktiven Remote-Panels wählen |
-| `F5` | markierte Datei ins andere Panel kopieren |
-| `F7` | Ordner anlegen (Name eintippen, `Enter`, `Esc` bricht ab) |
-| `F1` | Hilfe |
-| `F10`, `Esc`, `q`, `Ctrl-C` | beenden |
+| `Ctrl-C` | markierte Datei ins andere Panel kopieren |
+| `Ctrl-N` | Ordner anlegen (Name eintippen, `Enter`, `Esc` bricht ab) |
+| `?` | Hilfe |
+| `Ctrl-Q`, `Esc`, `q` | beenden |
+
+Es werden **keine Funktionstasten** verwendet: Terminals, tmux und Remote-Sessions fangen `F1`–`F12`
+uneinheitlich ab. Alle Aktionen liegen auf `Ctrl`-Kombinationen; `Ctrl-C` ist hier **Copy**, nicht
+Abbruch (im Transfer-Dialog bricht `Esc` ab). Einzige Ausnahme ohne `Ctrl` ist `?` für die Hilfe —
+`Ctrl-H` wäre nicht von Backspace zu unterscheiden.
 
 ### Verhalten
 
@@ -208,16 +213,16 @@ F1 Help  F5 Copy  F7 MkDir  F10 Quit  Tab Switch  Ctrl-U Swap  Ctrl-R Reload  Ct
   ist lokal, das rechte zeigt den Reader (Speicher per `Ctrl-S` wechselbar). Reader → Reader ist
   noch nicht unterstützt (MTP kann nicht streamend zwischen zwei Objekten kopieren) und wird mit
   Hinweis abgelehnt.
-* **Kopieren** nutzt denselben Streaming-Kern wie `pull`/`push`. Existiert das Ziel bereits, fragt
-  die TUI nach; `y`/`Enter` bestätigt, `n`/`Esc` bricht ab. Ein laufender Transfer zeigt einen
-  Fortschrittsdialog, `Esc` bricht ihn ab (kooperativ, ohne das Gerät zu blockieren).
+* **Kopieren** (`Ctrl-C`) nutzt denselben Streaming-Kern wie `pull`/`push`. Existiert das Ziel
+  bereits, fragt die TUI nach; `y`/`Enter` bestätigt, `n`/`Esc` bricht ab. Ein laufender Transfer
+  zeigt einen Fortschrittsdialog, `Esc` bricht ihn ab (kooperativ, ohne das Gerät zu blockieren).
 * **Kein Löschen, kein Umbenennen, keine Rekursion** – wie im CLI-MVP. Ordner werden im Panel
-  angezeigt, aber `F5` kopiert nur Dateien.
+  angezeigt, aber `Ctrl-C` kopiert nur Dateien.
 * **Nichts blockiert die Oberfläche:** Geräte-I/O läuft in einem eigenen Thread mit eigener
   Tokio-Runtime; die UI verarbeitet währenddessen Tastendrücke und zeichnet Fortschritt.
 * **Freier Platz** wird nach jedem Transfer aktualisiert (Header und Statuszeile).
 * **Diagnose:** damit Log-Ausgaben nicht in die Vollbild-Oberfläche schreiben, gehen sie bei `-v`
-  in eine Datei (`$TMPDIR/booxmtp-tui.log`); der Pfad steht auch im Hilfebildschirm (`F1`).
+  in eine Datei (`$TMPDIR/booxmtp-tui.log`); der Pfad steht auch im Hilfebildschirm (`?`).
 * **Fehler** erscheinen als Dialog mit Hinweis; fatale Fehler (kein Gerät, falsche Seriennummer)
   beenden die TUI und werden wie beim CLI mit Exit-Code gemeldet.
 

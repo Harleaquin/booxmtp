@@ -108,7 +108,7 @@ class Tui:
         self.pump(settle)
 
     def quit(self) -> int:
-        self.send(b"\x1b[21~", 1.5)  # F10
+        self.send(b"\x11", 1.5)  # Ctrl-Q
         try:
             return os.waitpid(self.pid, 0)[1] >> 8
         except ChildProcessError:
@@ -178,12 +178,12 @@ def main() -> int:
     check("local panel", tui.wait_for("Local:"))
     check("device header", tui.wait_for("serial"))
     check("remote panel", tui.wait_for(f"{options.storage}:"))
-    check("key bar", tui.wait_for("F5 Copy"))
+    check("key bar", tui.wait_for("Ctrl-C Copy"))
 
     # 1) Upload: ".." is selected; one Down selects the fixture file.
     tui.send(b"\x1b[B")
     check("fixture listed", "smoke.bin" in tui.panel_text("left"))
-    tui.send(b"\x1b[15~")  # F5
+    tui.send(b"\x03")  # Ctrl-C = copy
     # A leftover `/smoke.bin` from an earlier run triggers the overwrite dialog: accept it.
     if tui.wait_for("Overwrite?", timeout=5):
         tui.send(b"y")
@@ -193,13 +193,13 @@ def main() -> int:
     # 2) Download with overwrite confirmation.
     tui.send(b"\t")
     tui.send(b"\x1b[F")  # End
-    tui.send(b"\x1b[15~")  # F5
+    tui.send(b"\x03")  # Ctrl-C = copy
     check("overwrite dialog", tui.wait_for("Overwrite?"))
     tui.send(b"y")
     check("download finished", tui.wait_for("Downloaded /smoke.bin"))
 
     # 3) Create a folder on the device.
-    tui.send(b"\x1b[18~")  # F7
+    tui.send(b"\x0e")  # Ctrl-N = new folder
     check("mkdir dialog", tui.wait_for("Create folder"))
     tui.send(folder_name.encode())
     tui.send(b"\r")
@@ -208,7 +208,7 @@ def main() -> int:
     check("new folder listed", tui.wait_for_panel("right", f"{folder_name}/"))
 
     # 4) Help and clean shutdown.
-    tui.send(b"\x1bOP")  # F1
+    tui.send(b"?")  # help
     check("help", tui.wait_for("Navigation"))
     tui.send(b"\x1b")
     status = tui.quit()
