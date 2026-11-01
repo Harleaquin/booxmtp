@@ -3,7 +3,12 @@ name = "booxmtp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "File transfer between macOS and Android-based MTP e-readers (BOOX)"
+description = "MTP file transfer CLI and Midnight-Commander-style TUI for Android e-readers (BOOX)"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Harleaquin/booxmtp"
+keywords = ["mtp", "boox", "tui", "file-transfer", "ebook"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 async-recursion = "1.2.0"
